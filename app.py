@@ -238,6 +238,102 @@ else:
 
 st.divider()
 
+# ---------- Daily revenue (granular look at the selected range) ----------
+st.subheader("Daily revenue")
+if not invoices_df.empty and "invoiceDate" in invoices_df.columns:
+    days_in_range = (end - start).days + 1
+    full_range = pd.date_range(start=start, end=end, freq="D")
+    daily = (
+        invoices_df.dropna(subset=["invoiceDate"])
+        .set_index("invoiceDate")
+        .resample("D")["total"]
+        .sum()
+        .reindex(full_range, fill_value=0.0)
+    )
+
+    avg_day = float(daily.mean())
+    median_day = float(daily.median())
+    best_day_val = float(daily.max())
+    best_day_idx = daily.idxmax()
+    worst_nonzero_val = float(daily[daily > 0].min()) if (daily > 0).any() else 0.0
+    days_with_rev = int((daily > 0).sum())
+    days_zero = days_in_range - days_with_rev
+
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("Avg per day", f"${avg_day:,.0f}")
+    d2.metric("Median per day", f"${median_day:,.0f}")
+    d3.metric(
+        "Best day",
+        f"${best_day_val:,.0f}",
+        help=f"{best_day_idx.strftime('%a, %b %d, %Y')}",
+    )
+    d4.metric(
+        "Days with revenue",
+        f"{days_with_rev:,} / {days_in_range:,}",
+        help=f"{days_zero:,} days had no invoiced revenue.",
+    )
+
+    # Daily bar chart with mean line
+    daily_df = daily.reset_index()
+    daily_df.columns = ["date", "total"]
+    fig = px.bar(
+        daily_df,
+        x="date",
+        y="total",
+        labels={"date": "Date", "total": "Revenue ($)"},
+    )
+    fig.add_hline(
+        y=avg_day,
+        line_dash="dash",
+        line_color="gray",
+        annotation_text=f"avg ${avg_day:,.0f}",
+        annotation_position="top right",
+    )
+    fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=300)
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Day-of-week breakdown
+    dow_df = daily_df.copy()
+    dow_df["dow"] = dow_df["date"].dt.day_name()
+    dow_df["dow_num"] = dow_df["date"].dt.dayofweek
+    dow_avg = (
+        dow_df.groupby(["dow_num", "dow"], as_index=False)["total"]
+        .mean()
+        .sort_values("dow_num")
+    )
+    dow_total = (
+        dow_df.groupby(["dow_num", "dow"], as_index=False)["total"]
+        .sum()
+        .sort_values("dow_num")
+    )
+
+    dow_left, dow_right = st.columns(2)
+    with dow_left:
+        st.caption("Average revenue per day of week")
+        fig_dow = px.bar(
+            dow_avg,
+            x="dow",
+            y="total",
+            labels={"dow": "", "total": "Avg revenue ($)"},
+        )
+        fig_dow.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=260)
+        st.plotly_chart(fig_dow, use_container_width=True)
+    with dow_right:
+        st.caption("Total revenue by day of week")
+        fig_dow2 = px.bar(
+            dow_total,
+            x="dow",
+            y="total",
+            labels={"dow": "", "total": "Total revenue ($)"},
+            color_discrete_sequence=["#2ca02c"],
+        )
+        fig_dow2.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=260)
+        st.plotly_chart(fig_dow2, use_container_width=True)
+else:
+    st.info("No revenue data in this range.")
+
+st.divider()
+
 left, right = st.columns([3, 2])
 
 with left:
