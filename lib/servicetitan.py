@@ -164,6 +164,10 @@ class ServiceTitanClient:
         path = f"/memberships/v2/tenant/{self.tenant_id}/invoice-templates/{template_id}"
         return self._request(path)
 
+    def get_customer_contacts(self, customer_id: int) -> list[dict[str, Any]]:
+        path = f"/crm/v2/tenant/{self.tenant_id}/customers/{customer_id}/contacts"
+        return list(self._paginate(path))
+
     def get_estimates(
         self,
         created_after: str | None = None,

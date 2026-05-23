@@ -84,6 +84,35 @@ Share the app URL with your team and tell them the password from `app_password`.
 - **Refreshing data:** Click **Sync from ServiceTitan** in the sidebar. Incremental sync takes ~10 seconds.
 - **Updating code:** Push to your main branch on GitHub. Streamlit auto-redeploys. The Postgres data persists, so no re-sync needed.
 
+## Daily followups email
+
+A GitHub Actions workflow ([.github/workflows/daily_followups_email.yml](.github/workflows/daily_followups_email.yml)) emails a digest of unsold estimates from the rolling last 7 days every morning at 13:00 UTC (8 AM ET / 9 AM EDT). It pulls fresh estimates from ServiceTitan, enriches them with customer phone numbers, and sends an HTML table via Gmail SMTP.
+
+### One-time setup
+
+1. **Generate a Gmail app password.** Go to https://myaccount.google.com/apppasswords (requires 2FA enabled on the account). Pick "Mail" → "Other (Custom name)" → name it `ServiceTitan reporting` → copy the 16-character password.
+
+2. **Add the GitHub repo secrets** at `https://github.com/<your-user>/<your-repo>/settings/secrets/actions`:
+
+   | Secret | Value |
+   | --- | --- |
+   | `ST_APP_KEY` / `ST_TENANT_ID` / `ST_CLIENT_ID` / `ST_CLIENT_SECRET` / `ST_ENVIRONMENT` | Same as Streamlit Cloud secrets. |
+   | `DATABASE_URL` | Same Neon URL as Streamlit Cloud. |
+   | `SMTP_USER` | The Gmail address sending the email. |
+   | `SMTP_PASSWORD` | The 16-char app password from step 1 (no spaces). |
+   | `EMAIL_TO` | Recipient address (your business partner). |
+   | `EMAIL_FROM` *(optional)* | Defaults to `SMTP_USER`. Use a display address like `"Pure Air Reports <reports@pureair.com>"` if you want. |
+
+3. **Test it.** From the Actions tab in GitHub, pick "Daily followups email" → "Run workflow". You should get an email within ~1 minute.
+
+### Run manually from your machine
+
+```bash
+.venv/bin/python scripts/send_followups_email.py
+```
+
+Requires the same env vars in `.env`.
+
 ## How caching works
 
 - The OAuth access token is cached in-process until ~1 minute before it expires.
