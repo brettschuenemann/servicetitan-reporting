@@ -25,7 +25,7 @@ st.caption(
 with st.sidebar:
     st.header("Filters")
     today = date.today()
-    start = st.date_input("From", today - timedelta(days=30))
+    start = st.date_input("From", today.replace(day=1))   # month-to-date by default
     end = st.date_input("To", today)
 
 if end < start:
