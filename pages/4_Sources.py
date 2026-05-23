@@ -300,3 +300,127 @@ else:
          "job_total", "invoice_total", "invoice_date", "summary"]
     ].to_csv(index=False).encode("utf-8")
     st.download_button("Download CSV", csv, file_name="ppc_jobs.csv", mime="text/csv")
+
+# ---- Expanded PPC attribution (customer-level) ----
+st.divider()
+st.subheader("Expanded PPC attribution (customer lifetime)")
+st.caption(
+    "Counts every invoice dated **on or after the customer's first PPC job**, "
+    "PLUS every invoice directly linked to a PPC-tagged job (even if backdated). "
+    "Idea: the PPC ad that first acquired the customer gets credit for their "
+    "ongoing business — and any invoice tied to a PPC job itself is always counted."
+)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_ppc_customer_attribution() -> tuple[pd.DataFrame, dict]:
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH ppc_first AS (
+                  SELECT j.customer_id, MIN(j.created_on) AS first_ppc_at
+                    FROM jobs j
+                    JOIN campaigns c ON c.id = j.campaign_id
+                   WHERE c.name = 'Pay Per Click (PPC)' AND j.customer_id IS NOT NULL
+                   GROUP BY j.customer_id
+                ),
+                ppc_direct_invoice_ids AS (
+                  SELECT DISTINCT i.id
+                    FROM jobs j
+                    JOIN campaigns c ON c.id = j.campaign_id
+                    JOIN invoices i ON i.id = j.invoice_id
+                   WHERE c.name = 'Pay Per Click (PPC)'
+                ),
+                cust_name AS (
+                  SELECT customer_id, MIN(customer_name) AS name
+                    FROM invoices WHERE customer_name IS NOT NULL GROUP BY customer_id
+                )
+                SELECT
+                  i.customer_id,
+                  COALESCE(cn.name, 'Customer ' || i.customer_id::text) AS customer,
+                  COUNT(*)                              AS invoices,
+                  SUM(i.total)                          AS revenue,
+                  MIN(i.invoice_date)                   AS first_invoice,
+                  MAX(i.invoice_date)                   AS latest_invoice,
+                  MIN(p.first_ppc_at)::date             AS first_ppc_date
+                FROM invoices i
+                JOIN ppc_first p ON p.customer_id = i.customer_id
+                LEFT JOIN cust_name cn ON cn.customer_id = i.customer_id
+                WHERE i.invoice_date >= p.first_ppc_at::date
+                   OR i.id IN (SELECT id FROM ppc_direct_invoice_ids)
+                GROUP BY i.customer_id, cn.name
+                ORDER BY revenue DESC NULLS LAST
+                """
+            )
+            by_cust = pd.DataFrame([dict(r) for r in cur.fetchall()])
+
+            # Direct PPC revenue for comparison: only invoices linked to PPC-tagged jobs
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(i.total), 0) AS direct_revenue,
+                       COUNT(DISTINCT i.id)     AS direct_invoices
+                FROM jobs j
+                JOIN campaigns c ON c.id = j.campaign_id
+                JOIN invoices i ON i.id = j.invoice_id
+                WHERE c.name = 'Pay Per Click (PPC)'
+                """
+            )
+            row = cur.fetchone()
+            direct_rev = float(row["direct_revenue"] or 0)
+            direct_invoices = int(row["direct_invoices"] or 0)
+    return by_cust, {"direct_revenue": direct_rev, "direct_invoices": direct_invoices}
+
+
+by_cust, ppc_meta = load_ppc_customer_attribution()
+
+if by_cust.empty:
+    st.info("No PPC-attributed customers yet.")
+else:
+    by_cust["revenue"] = by_cust["revenue"].fillna(0.0).astype(float)
+    by_cust["invoices"] = by_cust["invoices"].astype(int)
+
+    total_customers = len(by_cust)
+    total_invoices = int(by_cust["invoices"].sum())
+    expanded_revenue = float(by_cust["revenue"].sum())
+    direct_rev = ppc_meta["direct_revenue"]
+    uplift = expanded_revenue - direct_rev
+    uplift_pct = (uplift / direct_rev * 100) if direct_rev else 0
+
+    e1, e2, e3, e4 = st.columns(4)
+    e1.metric("PPC customers", f"{total_customers:,}")
+    e2.metric("Their total invoices", f"{total_invoices:,}")
+    e3.metric("Expanded PPC revenue", f"${expanded_revenue:,.0f}")
+    e4.metric(
+        "Uplift vs direct PPC",
+        f"+${uplift:,.0f}",
+        delta=f"{uplift_pct:+.0f}% vs ${direct_rev:,.0f} direct",
+    )
+
+    display = by_cust.assign(
+        revenue_fmt=lambda d: d["revenue"].map(lambda v: f"${v:,.2f}"),
+        first_ppc=lambda d: pd.to_datetime(d["first_ppc_date"]).dt.strftime("%Y-%m-%d"),
+        first=lambda d: pd.to_datetime(d["first_invoice"]).dt.strftime("%Y-%m-%d"),
+        latest=lambda d: pd.to_datetime(d["latest_invoice"]).dt.strftime("%Y-%m-%d"),
+    ).rename(
+        columns={
+            "customer": "Customer",
+            "invoices": "Invoices",
+            "revenue_fmt": "Revenue",
+            "first_ppc": "First PPC",
+            "first": "First invoice (post-PPC)",
+            "latest": "Latest invoice",
+            "customer_id": "Customer ID",
+        }
+    )[["Customer", "First PPC", "Invoices", "Revenue", "First invoice (post-PPC)",
+       "Latest invoice", "Customer ID"]]
+    st.dataframe(display, use_container_width=True, hide_index=True, height=380)
+
+    csv = by_cust[
+        ["customer_id", "customer", "first_ppc_date", "invoices", "revenue",
+         "first_invoice", "latest_invoice"]
+    ].to_csv(index=False).encode("utf-8")
+    st.download_button(
+        "Download expanded PPC CSV", csv,
+        file_name="ppc_customer_attribution.csv", mime="text/csv",
+    )
