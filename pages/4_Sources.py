@@ -214,3 +214,89 @@ fig.update_layout(
     legend=dict(orientation="h", y=-0.2),
 )
 st.plotly_chart(fig, use_container_width=True)
+
+# ---- PPC jobs list (newest first) ----
+st.divider()
+st.subheader("Pay Per Click jobs (newest first)")
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_ppc_jobs() -> pd.DataFrame:
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                WITH cust_name AS (
+                  SELECT customer_id, MIN(customer_name) AS name
+                  FROM invoices WHERE customer_name IS NOT NULL GROUP BY customer_id
+                )
+                SELECT
+                  j.id            AS job_id,
+                  j.job_number,
+                  j.created_on,
+                  j.completed_on,
+                  j.job_status,
+                  j.summary,
+                  j.total         AS job_total,
+                  i.total         AS invoice_total,
+                  i.invoice_date,
+                  COALESCE(cn.name, 'Customer ' || j.customer_id::text) AS customer
+                FROM jobs j
+                JOIN campaigns c ON c.id = j.campaign_id
+                LEFT JOIN cust_name cn ON cn.customer_id = j.customer_id
+                LEFT JOIN invoices i ON i.id = j.invoice_id
+                WHERE c.name = 'Pay Per Click (PPC)'
+                ORDER BY j.created_on DESC
+                """
+            )
+            return pd.DataFrame([dict(r) for r in cur.fetchall()])
+
+
+ppc = load_ppc_jobs()
+if ppc.empty:
+    st.info("No PPC jobs in the cache yet.")
+else:
+    ppc["job_total"] = ppc["job_total"].fillna(0.0).astype(float)
+    ppc["invoice_total"] = ppc["invoice_total"].fillna(0.0).astype(float)
+    p1, p2, p3 = st.columns(3)
+    p1.metric("PPC jobs", f"{len(ppc):,}")
+    p2.metric("Total job value", f"${ppc['job_total'].sum():,.0f}")
+    p3.metric("Total invoiced", f"${ppc['invoice_total'].sum():,.0f}")
+
+    display = ppc.assign(
+        created=lambda d: pd.to_datetime(d["created_on"]).dt.strftime("%Y-%m-%d"),
+        invoiced=lambda d: pd.to_datetime(d["invoice_date"]).dt.strftime("%Y-%m-%d"),
+        job_val=lambda d: d["job_total"].map(lambda v: f"${v:,.2f}"),
+        inv_val=lambda d: d["invoice_total"].map(lambda v: f"${v:,.2f}"),
+    ).rename(
+        columns={
+            "customer": "Customer",
+            "created": "Created",
+            "invoiced": "Invoiced",
+            "job_status": "Status",
+            "summary": "Summary",
+            "job_val": "Job value",
+            "inv_val": "Invoiced value",
+            "job_number": "Job #",
+            "job_id": "Job ID",
+        }
+    )[
+        [
+            "Created",
+            "Customer",
+            "Job #",
+            "Status",
+            "Job value",
+            "Invoiced value",
+            "Invoiced",
+            "Summary",
+            "Job ID",
+        ]
+    ]
+    st.dataframe(display, use_container_width=True, hide_index=True, height=420)
+
+    csv = ppc[
+        ["job_id", "job_number", "customer", "created_on", "job_status",
+         "job_total", "invoice_total", "invoice_date", "summary"]
+    ].to_csv(index=False).encode("utf-8")
+    st.download_button("Download CSV", csv, file_name="ppc_jobs.csv", mime="text/csv")
