@@ -41,7 +41,7 @@ def main() -> int:
     today = date.today()
     print(f"Building AI summary for {today}…")
     # escape_dollars=False — email clients render markdown without LaTeX munging
-    summary_md, brief = build_summary(today, escape_dollars=False)
+    summary_md, brief = build_summary(today, escape_dollars=False, source="weekly_email")
     print(f"Got {len(summary_md)} chars of summary.")
 
     summary_html = md.markdown(summary_md, extensions=["extra"])

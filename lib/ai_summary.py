@@ -397,13 +397,20 @@ def _anthropic_key() -> str | None:
     return os.environ.get("ANTHROPIC_API_KEY")
 
 
-def build_summary(today: date, escape_dollars: bool = True) -> tuple[str, str]:
+def build_summary(
+    today: date, escape_dollars: bool = True, source: str = "dashboard"
+) -> tuple[str, str]:
     """Generate the AI summary. Plain function — no Streamlit cache.
 
     Returns (markdown_summary, raw_metrics_brief). Set `escape_dollars=False`
     when sending to a non-Streamlit renderer (email, file, etc.) — Streamlit's
     markdown treats unescaped `$` pairs as LaTeX, but normal markdown clients
     do not and would render the backslashes literally.
+
+    Every successful generation is logged to the `ai_summaries` table so
+    history is preserved across cache expirations. The DB stores the
+    *unescaped* markdown regardless of `escape_dollars` — escaping is a
+    rendering concern, not a data one.
     """
     api_key = _anthropic_key() or os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -422,10 +429,32 @@ def build_summary(today: date, escape_dollars: bool = True) -> tuple[str, str]:
         system=_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_brief}],
     )
-    text = next((b.text for b in response.content if b.type == "text"), "")
-    if escape_dollars:
-        text = text.replace("$", r"\$")
-    return text, user_brief
+    raw_text = next((b.text for b in response.content if b.type == "text"), "")
+
+    # Log to DB (best-effort — never let a logging failure break the summary).
+    try:
+        with db() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO ai_summaries (
+                    period_start, period_end, window_days, source, summary_md, raw_brief
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    metrics["start"],
+                    metrics["end"],
+                    metrics["window_days"],
+                    source,
+                    raw_text,
+                    user_brief,
+                ),
+            )
+            conn.commit()
+    except Exception as exc:
+        # Log to stdout but don't fail — the summary itself is still good.
+        print(f"[ai_summary] could not log to DB: {exc}")
+
+    return (raw_text.replace("$", r"\$") if escape_dollars else raw_text, user_brief)
 
 
 @st.cache_data(ttl=4 * 3600, show_spinner=False)

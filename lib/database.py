@@ -185,6 +185,18 @@ CREATE TABLE IF NOT EXISTS sync_state (
     last_sync_at      TEXT,
     row_count         INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS ai_summaries (
+    id            BIGSERIAL PRIMARY KEY,
+    generated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    period_start  DATE,
+    period_end    DATE,
+    window_days   INTEGER,
+    source        TEXT,   -- 'dashboard' | 'weekly_email' | 'cli'
+    summary_md    TEXT NOT NULL,
+    raw_brief     TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_ai_summaries_generated_at ON ai_summaries(generated_at DESC);
 """
 
 
