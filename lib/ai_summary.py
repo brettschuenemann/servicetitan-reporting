@@ -29,6 +29,7 @@ Style:
 - Spot trends, not just point-in-time numbers
 - Call out concerning signals worth investigating
 - End with 2-3 specific, actionable items tied to dollar amounts
+- Use plain markdown only — no LaTeX, no `$...$` math expressions, no `\frac{}{}`. Dollar signs go directly in the prose (e.g. "$10,500" or "USD 10,500") and must NOT be paired in ways a markdown renderer could mistake for math delimiters.
 
 Methodology you must respect:
 - Revenue numbers are from the ServiceTitan invoice ledger, reconciled with the accountant's "Total for Income" to within 0.5%.
@@ -236,4 +237,7 @@ def generate_summary(today_iso: str) -> tuple[str, str]:
         messages=[{"role": "user", "content": user_brief}],
     )
     text = next((b.text for b in response.content if b.type == "text"), "")
+    # Streamlit's markdown renderer treats unescaped $ pairs as LaTeX math.
+    # Escape every $ so dollar amounts render literally.
+    text = text.replace("$", r"\$")
     return text, user_brief
