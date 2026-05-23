@@ -9,8 +9,10 @@ import streamlit as st
 from lib.auth import require_password
 from lib.loaders import load_jobs
 from lib.reporting import jobs_to_dataframe
+from lib.style import apply_mobile_styles, chart_height
 
 st.set_page_config(page_title="Jobs · ServiceTitan Reporting", layout="wide")
+apply_mobile_styles()
 require_password()
 st.title("Jobs report")
 
@@ -56,7 +58,7 @@ if "createdOn" in filtered.columns:
         .reset_index(name="jobs")
     )
     fig = px.bar(daily, x="createdOn", y="jobs", labels={"createdOn": "Date", "jobs": "Jobs"})
-    fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=320)
+    fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=chart_height("default"))
     st.plotly_chart(fig, use_container_width=True)
 
 st.subheader(f"{len(filtered):,} jobs")

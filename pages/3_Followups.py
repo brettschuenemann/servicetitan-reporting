@@ -12,8 +12,10 @@ import streamlit as st
 
 from lib.auth import require_password
 from lib.database import db
+from lib.style import apply_mobile_styles, chart_height
 
 st.set_page_config(page_title="Followups · ServiceTitan Reporting", layout="wide")
+apply_mobile_styles()
 require_password()
 st.title("Followups — unsold estimates")
 st.caption(
@@ -182,7 +184,7 @@ with bk_left:
         text="count",
         labels={"Age bucket": "", "count": "Estimates"},
     )
-    fig1.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=280)
+    fig1.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=chart_height("compact"))
     st.plotly_chart(fig1, use_container_width=True)
 with bk_right:
     st.caption("Pipeline value by age")
@@ -194,5 +196,5 @@ with bk_right:
         labels={"Age bucket": "", "value": "Pipeline ($)"},
         color_discrete_sequence=["#2ca02c"],
     )
-    fig2.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=280)
+    fig2.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=chart_height("compact"))
     st.plotly_chart(fig2, use_container_width=True)

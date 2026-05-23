@@ -16,6 +16,7 @@ import streamlit as st
 
 from lib.auth import require_password
 from lib.database import db
+from lib.style import apply_mobile_styles, chart_height
 from lib.loaders import (
     get_client,
     load_invoices,
@@ -45,6 +46,7 @@ def _months_back(d: date, n: int) -> date:
 
 
 st.set_page_config(page_title="ServiceTitan Reporting", layout="wide")
+apply_mobile_styles()
 require_password()
 
 st.title("ServiceTitan Reporting")
@@ -241,7 +243,7 @@ if yoy_df is not None and not yoy_df.empty and "invoiceDate" in yoy_df.columns:
         labels={"month": "Month", "cumulative": "Cumulative revenue ($)"},
     )
     fig.update_traces(hovertemplate="%{x}: $%{y:,.0f}<extra>%{fullData.name}</extra>")
-    fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=400)
+    fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=chart_height("tall"))
     st.plotly_chart(fig, use_container_width=True)
 else:
     st.info("Not enough revenue data for the year-over-year section.")
@@ -349,7 +351,7 @@ fig_week = go.Figure(
 )
 fig_week.update_layout(
     margin=dict(l=0, r=0, t=10, b=0),
-    height=320,
+    height=chart_height("default"),
     yaxis_title="Revenue ($)",
     showlegend=False,
 )
@@ -382,7 +384,7 @@ with left:
         )
         fig.update_traces(texttemplate="$%{text:,.0f}", textposition="outside")
         fig.update_xaxes(tickformat="%b %Y", dtick="M1")
-        fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=360)
+        fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=chart_height("tall"))
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("No invoice data for this range.")
@@ -393,7 +395,7 @@ with right:
         counts = jobs_df["jobStatus"].value_counts().reset_index()
         counts.columns = ["Status", "Count"]
         fig = px.bar(counts, x="Status", y="Count", color="Status")
-        fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=360, showlegend=False)
+        fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=chart_height("tall"), showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("No job data for this range.")
@@ -417,7 +419,7 @@ if yoy_df is not None and not yoy_df.empty:
         },
         labels={"month": "Month", "total": "Revenue ($)"},
     )
-    fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=400, legend=dict(orientation="h", y=-0.2))
+    fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=chart_height("tall"), legend=dict(orientation="h", y=-0.2))
     st.plotly_chart(fig, use_container_width=True)
 else:
     st.info("Not enough invoice data to show a year-over-year comparison.")
@@ -459,7 +461,7 @@ if mem_billed_in_range:
         labels={"date": "Month", "total": "Contract value ($)"},
     )
     fig.update_xaxes(tickformat="%b %Y", dtick="M1")
-    fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=280)
+    fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=chart_height("compact"))
     st.plotly_chart(fig, use_container_width=True)
 
 st.divider()

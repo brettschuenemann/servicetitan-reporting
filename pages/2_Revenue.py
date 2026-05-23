@@ -9,8 +9,10 @@ import streamlit as st
 from lib.auth import require_password
 from lib.loaders import load_invoices
 from lib.reporting import invoices_to_dataframe
+from lib.style import apply_mobile_styles, chart_height
 
 st.set_page_config(page_title="Revenue · ServiceTitan Reporting", layout="wide")
+apply_mobile_styles()
 require_password()
 st.title("Revenue report")
 
@@ -66,7 +68,7 @@ if date_col in df.columns:
         markers=True,
         labels={date_col: "Date", "total": "Revenue ($)"},
     )
-    fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=340)
+    fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=chart_height("default"))
     st.plotly_chart(fig, use_container_width=True)
 
 left, right = st.columns(2)
@@ -88,7 +90,7 @@ with left:
             orientation="h",
             labels={"total": "Revenue ($)", "businessUnitName": "Business unit"},
         )
-        fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=360, yaxis={"categoryorder": "total ascending"})
+        fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=chart_height("tall"), yaxis={"categoryorder": "total ascending"})
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("Business unit name not present on invoices.")
@@ -110,7 +112,7 @@ with right:
             orientation="h",
             labels={"total": "Revenue ($)", "customerName": "Customer"},
         )
-        fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=360, yaxis={"categoryorder": "total ascending"})
+        fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=chart_height("tall"), yaxis={"categoryorder": "total ascending"})
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info("Customer name not present on invoices.")
