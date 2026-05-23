@@ -101,11 +101,16 @@ agg = (
     .agg(
         jobs=("job_id", "count"),
         revenue=("invoice_total", "sum"),
-        jobs_invoiced=("invoice_total", lambda s: int((s > 0).sum())),
+        jobs_paid=("invoice_total", lambda s: int((s > 0).sum())),
     )
-    .assign(avg_ticket=lambda d: (d["revenue"] / d["jobs"]).round(2))
+    .assign(
+        avg_paid=lambda d: (d["revenue"] / d["jobs_paid"].replace(0, pd.NA)).round(2),
+        conversion=lambda d: (d["jobs_paid"] / d["jobs"] * 100).round(1),
+    )
     .sort_values("revenue", ascending=False)
 )
+# Backfill NaN avg_paid (sources with zero paid jobs) to 0 for display.
+agg["avg_paid"] = agg["avg_paid"].fillna(0)
 
 # ---- KPIs ----
 total_jobs = int(agg["jobs"].sum())
@@ -143,14 +148,14 @@ with left:
     st.plotly_chart(fig, use_container_width=True)
 
 with right:
-    st.subheader("Average job value by source")
+    st.subheader("Avg per paid job (excl. \\$0 invoices)")
     fig = px.bar(
         agg,
-        x="avg_ticket",
+        x="avg_paid",
         y="campaign_name",
         orientation="h",
-        text="avg_ticket",
-        labels={"avg_ticket": "Avg invoice ($)", "campaign_name": ""},
+        text="avg_paid",
+        labels={"avg_paid": "Avg paid invoice ($)", "campaign_name": ""},
         color_discrete_sequence=["#2ca02c"],
     )
     fig.update_traces(texttemplate="$%{text:,.0f}", textposition="outside")
@@ -164,27 +169,34 @@ with right:
 
 st.divider()
 st.subheader("Source breakdown")
+st.caption(
+    "**Conversion** = paid jobs / total jobs (low conversion = lots of estimates that didn't close, "
+    "warranty work, or free callouts that came in but didn't bill). "
+    "**Avg/paid job** ignores \\$0 invoices, so it reflects what an actual revenue-producing job is worth."
+)
 display = (
     agg.assign(
         revenue_fmt=lambda d: d["revenue"].map(lambda v: f"${v:,.2f}"),
-        avg_ticket_fmt=lambda d: d["avg_ticket"].map(lambda v: f"${v:,.2f}"),
+        avg_paid_fmt=lambda d: d["avg_paid"].map(lambda v: f"${v:,.2f}"),
+        conversion_fmt=lambda d: d["conversion"].map(lambda v: f"{v:.0f}%"),
         share=lambda d: (d["revenue"] / d["revenue"].sum() * 100).map(lambda v: f"{v:.1f}%"),
     )
     .rename(
         columns={
             "campaign_name": "Source",
-            "jobs": "Jobs",
-            "jobs_invoiced": "Jobs invoiced",
+            "jobs": "Total jobs",
+            "jobs_paid": "Paid jobs",
+            "conversion_fmt": "Conversion",
             "revenue_fmt": "Revenue",
-            "avg_ticket_fmt": "Avg/job",
+            "avg_paid_fmt": "Avg/paid job",
             "share": "% of revenue",
         }
-    )[["Source", "Jobs", "Jobs invoiced", "Revenue", "Avg/job", "% of revenue"]]
+    )[["Source", "Total jobs", "Paid jobs", "Conversion", "Revenue", "Avg/paid job", "% of revenue"]]
 )
 st.dataframe(display, use_container_width=True, hide_index=True)
 
 csv = (
-    agg[["campaign_name", "jobs", "jobs_invoiced", "revenue", "avg_ticket"]]
+    agg[["campaign_name", "jobs", "jobs_paid", "conversion", "revenue", "avg_paid"]]
     .to_csv(index=False)
     .encode("utf-8")
 )

@@ -341,22 +341,22 @@ def _anthropic_key() -> str | None:
     return os.environ.get("ANTHROPIC_API_KEY")
 
 
-@st.cache_data(ttl=4 * 3600, show_spinner=False)
-def generate_summary(today_iso: str) -> tuple[str, str]:
-    """Generate the AI summary for the given day. Cached for 4 hours.
+def build_summary(today: date, escape_dollars: bool = True) -> tuple[str, str]:
+    """Generate the AI summary. Plain function — no Streamlit cache.
 
-    Returns (markdown_summary, raw_metrics_brief). The `today_iso` arg is the
-    cache key — same day = cached result; new day = regenerated.
+    Returns (markdown_summary, raw_metrics_brief). Set `escape_dollars=False`
+    when sending to a non-Streamlit renderer (email, file, etc.) — Streamlit's
+    markdown treats unescaped `$` pairs as LaTeX, but normal markdown clients
+    do not and would render the backslashes literally.
     """
-    api_key = _anthropic_key()
+    api_key = _anthropic_key() or os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise RuntimeError(
             "ANTHROPIC_API_KEY is not set. Add it to .env (local) or "
             ".streamlit/secrets.toml (cloud). Get one from console.anthropic.com."
         )
 
-    end = date.fromisoformat(today_iso)
-    metrics = _gather_metrics(end)
+    metrics = _gather_metrics(today)
     user_brief = _format_user_prompt(metrics)
 
     client = anthropic.Anthropic(api_key=api_key)
@@ -367,7 +367,12 @@ def generate_summary(today_iso: str) -> tuple[str, str]:
         messages=[{"role": "user", "content": user_brief}],
     )
     text = next((b.text for b in response.content if b.type == "text"), "")
-    # Streamlit's markdown renderer treats unescaped $ pairs as LaTeX math.
-    # Escape every $ so dollar amounts render literally.
-    text = text.replace("$", r"\$")
+    if escape_dollars:
+        text = text.replace("$", r"\$")
     return text, user_brief
+
+
+@st.cache_data(ttl=4 * 3600, show_spinner=False)
+def generate_summary(today_iso: str) -> tuple[str, str]:
+    """Streamlit-cached wrapper around `build_summary`. Cached 4h per day key."""
+    return build_summary(date.fromisoformat(today_iso))

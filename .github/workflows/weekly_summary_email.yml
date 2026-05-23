@@ -1,0 +1,38 @@
+name: Weekly AI summary email
+
+on:
+  schedule:
+    # Fridays at 13:00 UTC = 8 AM ET (Standard) / 9 AM EDT (Daylight).
+    # GitHub doesn't honor DST.
+    - cron: '0 13 * * 5'
+  workflow_dispatch:   # manual "Run workflow" from the Actions tab
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Send summary email
+        env:
+          ST_APP_KEY: ${{ secrets.ST_APP_KEY }}
+          ST_TENANT_ID: ${{ secrets.ST_TENANT_ID }}
+          ST_CLIENT_ID: ${{ secrets.ST_CLIENT_ID }}
+          ST_CLIENT_SECRET: ${{ secrets.ST_CLIENT_SECRET }}
+          ST_ENVIRONMENT: ${{ secrets.ST_ENVIRONMENT }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+        run: python scripts/send_weekly_summary_email.py

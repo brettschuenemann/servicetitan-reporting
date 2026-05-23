@@ -113,6 +113,14 @@ A GitHub Actions workflow ([.github/workflows/daily_followups_email.yml](.github
 
 Requires the same env vars in `.env`.
 
+## Weekly AI summary email
+
+A second GitHub Actions workflow ([.github/workflows/weekly_summary_email.yml](.github/workflows/weekly_summary_email.yml)) emails the AI-generated weekly summary (same content as the dashboard's "AI summary" section) every **Friday at 13:00 UTC** (8 AM ET in winter, 9 AM EDT in summer).
+
+Setup: in addition to the followups-email secrets, the workflow needs `ANTHROPIC_API_KEY` in the GitHub Actions secrets. Add it at https://github.com/brettschuenemann/servicetitan-reporting/settings/secrets/actions.
+
+Test manually with: `python scripts/send_weekly_summary_email.py`
+
 ## How caching works
 
 - The OAuth access token is cached in-process until ~1 minute before it expires.
