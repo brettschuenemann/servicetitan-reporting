@@ -68,6 +68,42 @@ CREATE TABLE IF NOT EXISTS membership_templates (
     raw    JSONB NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS campaigns (
+    id           BIGINT PRIMARY KEY,
+    name         TEXT,
+    active       BOOLEAN,
+    is_default   BOOLEAN,
+    category     TEXT,
+    source       TEXT,
+    medium       TEXT,
+    created_on   TIMESTAMPTZ,
+    modified_on  TIMESTAMPTZ,
+    raw          JSONB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS jobs (
+    id                   BIGINT PRIMARY KEY,
+    job_number           TEXT,
+    job_status           TEXT,
+    job_type_id          BIGINT,
+    campaign_id          BIGINT,
+    business_unit_id     BIGINT,
+    customer_id          BIGINT,
+    location_id          BIGINT,
+    invoice_id           BIGINT,
+    summary              TEXT,
+    total                DOUBLE PRECISION,
+    completed_on         TIMESTAMPTZ,
+    created_on           TIMESTAMPTZ,
+    modified_on          TIMESTAMPTZ,
+    no_charge            BOOLEAN,
+    raw                  JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_jobs_completed_on ON jobs(completed_on);
+CREATE INDEX IF NOT EXISTS ix_jobs_modified_on  ON jobs(modified_on);
+CREATE INDEX IF NOT EXISTS ix_jobs_campaign     ON jobs(campaign_id);
+CREATE INDEX IF NOT EXISTS ix_jobs_customer     ON jobs(customer_id);
+
 CREATE TABLE IF NOT EXISTS estimates (
     id                   BIGINT PRIMARY KEY,
     status_name          TEXT,

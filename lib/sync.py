@@ -309,6 +309,125 @@ def sync_estimates(
     return {"upserted": len(estimates), "total": total_rows}
 
 
+def sync_campaigns(
+    client: ServiceTitanClient,
+    conn: psycopg2.extensions.connection,
+    progress: ProgressCallback = _noop,
+) -> dict:
+    progress("Fetching campaigns…")
+    campaigns = client.get_campaigns()
+    rows = []
+    for cmp in campaigns:
+        cat = cmp.get("category")
+        if isinstance(cat, dict):
+            cat = cat.get("name")
+        rows.append((
+            cmp["id"],
+            cmp.get("name"),
+            bool(cmp.get("active")),
+            bool(cmp.get("isDefaultCampaign")),
+            cat,
+            cmp.get("source"),
+            cmp.get("medium"),
+            cmp.get("createdOn"),
+            cmp.get("modifiedOn"),
+            json.dumps(cmp),
+        ))
+    if rows:
+        with conn.cursor() as cur:
+            execute_values(
+                cur,
+                """
+                INSERT INTO campaigns (
+                    id, name, active, is_default, category, source, medium,
+                    created_on, modified_on, raw
+                ) VALUES %s
+                ON CONFLICT (id) DO UPDATE SET
+                    name=EXCLUDED.name, active=EXCLUDED.active, is_default=EXCLUDED.is_default,
+                    category=EXCLUDED.category, source=EXCLUDED.source, medium=EXCLUDED.medium,
+                    created_on=EXCLUDED.created_on, modified_on=EXCLUDED.modified_on,
+                    raw=EXCLUDED.raw
+                """,
+                rows,
+                template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                page_size=500,
+            )
+        conn.commit()
+    set_sync_state(conn, "campaigns", None, len(campaigns))
+    progress(f"Campaigns synced. {len(campaigns)} total.")
+    return {"campaigns": len(campaigns)}
+
+
+def sync_jobs(
+    client: ServiceTitanClient,
+    conn: psycopg2.extensions.connection,
+    progress: ProgressCallback = _noop,
+) -> dict:
+    state = get_sync_state(conn, "jobs")
+    since = state["last_modified_on"] if state else None
+    progress(f"Fetching jobs{' since ' + since if since else ' (full)'}…")
+    jobs = client.get_all_jobs(modified_after=since) if since else client.get_all_jobs()
+    progress(f"Got {len(jobs)} jobs. Writing to DB…")
+
+    max_modified = since
+    rows = []
+    for j in jobs:
+        modified_on = j.get("modifiedOn")
+        max_modified = _maxstr(max_modified, modified_on)
+        rows.append((
+            j["id"],
+            j.get("jobNumber"),
+            j.get("jobStatus"),
+            j.get("jobTypeId"),
+            j.get("campaignId"),
+            j.get("businessUnitId"),
+            j.get("customerId"),
+            j.get("locationId"),
+            j.get("invoiceId"),
+            j.get("summary"),
+            _safe_float(j.get("total")),
+            j.get("completedOn"),
+            j.get("createdOn"),
+            modified_on,
+            bool(j.get("noCharge")),
+            json.dumps(j),
+        ))
+
+    if rows:
+        with conn.cursor() as cur:
+            execute_values(
+                cur,
+                """
+                INSERT INTO jobs (
+                    id, job_number, job_status, job_type_id, campaign_id,
+                    business_unit_id, customer_id, location_id, invoice_id,
+                    summary, total, completed_on, created_on, modified_on,
+                    no_charge, raw
+                ) VALUES %s
+                ON CONFLICT (id) DO UPDATE SET
+                    job_number=EXCLUDED.job_number, job_status=EXCLUDED.job_status,
+                    job_type_id=EXCLUDED.job_type_id, campaign_id=EXCLUDED.campaign_id,
+                    business_unit_id=EXCLUDED.business_unit_id,
+                    customer_id=EXCLUDED.customer_id, location_id=EXCLUDED.location_id,
+                    invoice_id=EXCLUDED.invoice_id, summary=EXCLUDED.summary,
+                    total=EXCLUDED.total, completed_on=EXCLUDED.completed_on,
+                    created_on=EXCLUDED.created_on, modified_on=EXCLUDED.modified_on,
+                    no_charge=EXCLUDED.no_charge, raw=EXCLUDED.raw
+                """,
+                rows,
+                template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                page_size=500,
+            )
+        conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM jobs")
+        total_rows = cur.fetchone()["n"]
+    set_sync_state(conn, "jobs", max_modified, total_rows)
+    progress(f"Jobs synced. {len(jobs)} touched, {total_rows} total in cache.")
+    return {"upserted": len(jobs), "total": total_rows}
+
+
 def sync_all(
     client: ServiceTitanClient,
     conn: psycopg2.extensions.connection,
@@ -317,4 +436,12 @@ def sync_all(
     inv_stats = sync_invoices(client, conn, progress)
     mem_stats = sync_memberships(client, conn, progress)
     est_stats = sync_estimates(client, conn, progress)
-    return {"invoices": inv_stats, "memberships": mem_stats, "estimates": est_stats}
+    job_stats = sync_jobs(client, conn, progress)
+    cmp_stats = sync_campaigns(client, conn, progress)
+    return {
+        "invoices": inv_stats,
+        "memberships": mem_stats,
+        "estimates": est_stats,
+        "jobs": job_stats,
+        "campaigns": cmp_stats,
+    }

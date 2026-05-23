@@ -168,6 +168,17 @@ class ServiceTitanClient:
         path = f"/crm/v2/tenant/{self.tenant_id}/customers/{customer_id}/contacts"
         return list(self._paginate(path))
 
+    def get_campaigns(self) -> list[dict[str, Any]]:
+        path = f"/marketing/v2/tenant/{self.tenant_id}/campaigns"
+        return list(self._paginate(path))
+
+    def get_all_jobs(self, modified_after: str | None = None) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {}
+        if modified_after:
+            params["modifiedOnOrAfter"] = modified_after
+        path = f"/jpm/v2/tenant/{self.tenant_id}/jobs"
+        return list(self._paginate(path, params))
+
     def get_estimates(
         self,
         created_after: str | None = None,
