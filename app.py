@@ -14,6 +14,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from lib.ai_summary import SUMMARY_DAYS, generate_summary
 from lib.auth import require_password
 from lib.database import db
 from lib.style import apply_mobile_styles, chart_height
@@ -54,6 +55,29 @@ st.caption(
     "Revenue is summed from the ServiceTitan invoice ledger by `invoiceDate`. "
     "Reconciles with the accountant's P&L to within 0.5% over Jan 2024 – Sep 2025."
 )
+
+# ---------- AI summary (top of page, independent of date filter) ----------
+_summary_today = date.today().isoformat()
+_summary_header, _summary_button = st.columns([4, 1])
+with _summary_header:
+    st.subheader(f"AI summary — last {SUMMARY_DAYS} days")
+with _summary_button:
+    if st.button("Refresh", use_container_width=True, help="Force a new summary now"):
+        generate_summary.clear()
+
+try:
+    with st.spinner("Generating summary with Claude…"):
+        _summary_md, _summary_brief = generate_summary(_summary_today)
+    with st.container(border=True):
+        st.markdown(_summary_md)
+    with st.expander("Show the raw data Claude saw"):
+        st.code(_summary_brief, language="text")
+except RuntimeError as exc:
+    st.info(f"⚙️ AI summary disabled: {exc}")
+except Exception as exc:
+    st.warning(f"Couldn't generate AI summary: {exc}")
+
+st.divider()
 
 # First-time setup: populate Postgres if it's empty (e.g., fresh DB).
 with db() as _conn:

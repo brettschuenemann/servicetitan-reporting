@@ -390,11 +390,16 @@ else:
     e1, e2, e3, e4 = st.columns(4)
     e1.metric("PPC customers", f"{total_customers:,}")
     e2.metric("Their total invoices", f"{total_invoices:,}")
-    e3.metric("Expanded PPC revenue", f"${expanded_revenue:,.0f}")
+    e3.metric(
+        "Total PPC revenue",
+        f"${expanded_revenue:,.0f}",
+        help=f"Direct PPC ${direct_rev:,.0f} + post-PPC repeats ${uplift:,.0f}",
+    )
     e4.metric(
-        "Uplift vs direct PPC",
+        "Post-PPC repeats",
         f"+${uplift:,.0f}",
-        delta=f"{uplift_pct:+.0f}% vs ${direct_rev:,.0f} direct",
+        delta=f"{uplift_pct:+.0f}% on top of direct" if direct_rev else None,
+        help="Additional revenue from PPC customers' follow-up invoices, on top of the direct PPC invoices.",
     )
 
     display = by_cust.assign(
