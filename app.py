@@ -8,7 +8,7 @@ the invoice ledger — adding them double-counts ~$120k of 2025 revenue).
 from __future__ import annotations
 
 import calendar
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import plotly.express as px
@@ -248,99 +248,116 @@ else:
 
 st.divider()
 
-# ---------- Daily revenue (granular look at the selected range) ----------
-st.subheader("Daily revenue")
-if not invoices_df.empty and "invoiceDate" in invoices_df.columns:
-    days_in_range = (end - start).days + 1
-    full_range = pd.date_range(start=start, end=end, freq="D")
-    daily = (
-        invoices_df.dropna(subset=["invoiceDate"])
+# ---------- This week's daily revenue (always today + the rest of this week) ----------
+# This section is independent of the sidebar date filter — it always shows the
+# current calendar week so today's number is front-and-center.
+_today = date.today()
+_week_start = _today - timedelta(days=(_today.weekday() + 1) % 7)  # Sunday
+_week_end = _week_start + timedelta(days=6)                         # Saturday
+_last_week_start = _week_start - timedelta(days=7)
+_last_week_end = _week_end - timedelta(days=7)
+
+st.subheader(f"This week ({_week_start.strftime('%b %d')} – {_week_end.strftime('%b %d, %Y')})")
+st.caption(
+    f"Today is **{_today.strftime('%A, %b %d')}**. "
+    "This view is fixed to the current calendar week; the sidebar filter doesn't affect it."
+)
+
+_week_invoices = invoices_to_dataframe(load_invoices(_week_start, _week_end))
+_last_week_invoices = invoices_to_dataframe(load_invoices(_last_week_start, _last_week_end))
+
+# Build a Sun–Sat series with zero-fill for days that have no revenue yet
+_week_days = pd.date_range(start=_week_start, end=_week_end, freq="D")
+if not _week_invoices.empty and "invoiceDate" in _week_invoices.columns:
+    _week_daily = (
+        _week_invoices.dropna(subset=["invoiceDate"])
         .set_index("invoiceDate")
         .resample("D")["total"]
         .sum()
-        .reindex(full_range, fill_value=0.0)
+        .reindex(_week_days, fill_value=0.0)
     )
-
-    avg_day = float(daily.mean())
-    median_day = float(daily.median())
-    best_day_val = float(daily.max())
-    best_day_idx = daily.idxmax()
-    worst_nonzero_val = float(daily[daily > 0].min()) if (daily > 0).any() else 0.0
-    days_with_rev = int((daily > 0).sum())
-    days_zero = days_in_range - days_with_rev
-
-    d1, d2, d3, d4 = st.columns(4)
-    d1.metric("Avg per day", f"${avg_day:,.0f}")
-    d2.metric("Median per day", f"${median_day:,.0f}")
-    d3.metric(
-        "Best day",
-        f"${best_day_val:,.0f}",
-        help=f"{best_day_idx.strftime('%a, %b %d, %Y')}",
-    )
-    d4.metric(
-        "Days with revenue",
-        f"{days_with_rev:,} / {days_in_range:,}",
-        help=f"{days_zero:,} days had no invoiced revenue.",
-    )
-
-    # Daily bar chart with mean line
-    daily_df = daily.reset_index()
-    daily_df.columns = ["date", "total"]
-    fig = px.bar(
-        daily_df,
-        x="date",
-        y="total",
-        labels={"date": "Date", "total": "Revenue ($)"},
-    )
-    fig.add_hline(
-        y=avg_day,
-        line_dash="dash",
-        line_color="gray",
-        annotation_text=f"avg ${avg_day:,.0f}",
-        annotation_position="top right",
-    )
-    fig.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=300)
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Day-of-week breakdown
-    dow_df = daily_df.copy()
-    dow_df["dow"] = dow_df["date"].dt.day_name()
-    dow_df["dow_num"] = dow_df["date"].dt.dayofweek
-    dow_avg = (
-        dow_df.groupby(["dow_num", "dow"], as_index=False)["total"]
-        .mean()
-        .sort_values("dow_num")
-    )
-    dow_total = (
-        dow_df.groupby(["dow_num", "dow"], as_index=False)["total"]
-        .sum()
-        .sort_values("dow_num")
-    )
-
-    dow_left, dow_right = st.columns(2)
-    with dow_left:
-        st.caption("Average revenue per day of week")
-        fig_dow = px.bar(
-            dow_avg,
-            x="dow",
-            y="total",
-            labels={"dow": "", "total": "Avg revenue ($)"},
-        )
-        fig_dow.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=260)
-        st.plotly_chart(fig_dow, use_container_width=True)
-    with dow_right:
-        st.caption("Total revenue by day of week")
-        fig_dow2 = px.bar(
-            dow_total,
-            x="dow",
-            y="total",
-            labels={"dow": "", "total": "Total revenue ($)"},
-            color_discrete_sequence=["#2ca02c"],
-        )
-        fig_dow2.update_layout(margin=dict(l=0, r=0, t=10, b=0), height=260)
-        st.plotly_chart(fig_dow2, use_container_width=True)
 else:
-    st.info("No revenue data in this range.")
+    _week_daily = pd.Series(0.0, index=_week_days)
+
+if not _last_week_invoices.empty and "invoiceDate" in _last_week_invoices.columns:
+    _last_week_daily = (
+        _last_week_invoices.dropna(subset=["invoiceDate"])
+        .set_index("invoiceDate")
+        .resample("D")["total"]
+        .sum()
+        .reindex(pd.date_range(start=_last_week_start, end=_last_week_end, freq="D"), fill_value=0.0)
+    )
+else:
+    _last_week_daily = pd.Series(
+        0.0, index=pd.date_range(start=_last_week_start, end=_last_week_end, freq="D")
+    )
+
+# Stats
+_today_ts = pd.Timestamp(_today)
+today_rev = float(_week_daily.loc[_today_ts]) if _today_ts in _week_daily.index else 0.0
+wtd = float(_week_daily.loc[:_today_ts].sum())
+# Match-up "same WTD" last week: through the same DOW position
+_match_through = _last_week_start + timedelta(days=(_today - _week_start).days)
+last_week_wtd = float(_last_week_daily.loc[: pd.Timestamp(_match_through)].sum())
+last_week_full = float(_last_week_daily.sum())
+
+# Same day last week (for "today vs same day last week")
+_last_same_day = pd.Timestamp(_today - timedelta(days=7))
+last_same_day_rev = (
+    float(_last_week_daily.loc[_last_same_day]) if _last_same_day in _last_week_daily.index else 0.0
+)
+
+
+def _delta(new: float, old: float) -> str | None:
+    if not old:
+        return None
+    return f"{(new - old) / old * 100:+.1f}% vs ${old:,.0f}"
+
+
+d1, d2, d3, d4 = st.columns(4)
+d1.metric(f"Today ({_today.strftime('%a')})", f"${today_rev:,.0f}", delta=_delta(today_rev, last_same_day_rev))
+d2.metric("Week-to-date", f"${wtd:,.0f}", delta=_delta(wtd, last_week_wtd))
+d3.metric("Last week (same WTD)", f"${last_week_wtd:,.0f}")
+d4.metric("Last week (full)", f"${last_week_full:,.0f}")
+
+# Bar chart for the 7 days of this week with today highlighted
+_chart_df = pd.DataFrame({"date": _week_days, "total": _week_daily.values})
+_chart_df["day_label"] = _chart_df["date"].dt.strftime("%a %m/%d")
+_chart_df["is_today"] = _chart_df["date"].dt.date == _today
+_chart_df["is_future"] = _chart_df["date"].dt.date > _today
+
+import plotly.graph_objects as go
+
+_colors = [
+    "#1f77b4" if not row.is_today else "#ff7f0e"
+    for row in _chart_df.itertuples()
+]
+# Future days get a lighter shade
+for i, row in enumerate(_chart_df.itertuples()):
+    if row.is_future:
+        _colors[i] = "#cccccc"
+
+fig_week = go.Figure(
+    go.Bar(
+        x=_chart_df["day_label"],
+        y=_chart_df["total"],
+        marker_color=_colors,
+        text=_chart_df["total"].map(lambda v: f"${v:,.0f}" if v else ""),
+        textposition="outside",
+        hovertemplate="%{x}: $%{y:,.0f}<extra></extra>",
+    )
+)
+fig_week.update_layout(
+    margin=dict(l=0, r=0, t=10, b=0),
+    height=320,
+    yaxis_title="Revenue ($)",
+    showlegend=False,
+)
+st.plotly_chart(fig_week, use_container_width=True)
+st.caption(
+    "🟠 today · 🔵 past days · ⚪ days not yet started · "
+    f"Compared with last week ({_last_week_start.strftime('%b %d')} – {_last_week_end.strftime('%b %d')})."
+)
 
 st.divider()
 
