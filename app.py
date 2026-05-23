@@ -491,12 +491,30 @@ if mem_billed_in_range:
 st.divider()
 st.subheader("Recent jobs")
 if not jobs_df.empty:
-    cols = [
+    recent = (
+        jobs_df.sort_values("createdOn", ascending=False).head(25)
+        if "createdOn" in jobs_df.columns
+        else jobs_df.head(25)
+    ).copy()
+    display_cols = [
         c
-        for c in ("jobNumber", "jobStatus", "createdOn", "completedOn", "summary")
-        if c in jobs_df.columns
+        for c in ("jobStatus", "createdOn", "completedOn", "total", "summary")
+        if c in recent.columns
     ]
-    recent = jobs_df.sort_values("createdOn", ascending=False).head(25) if "createdOn" in jobs_df.columns else jobs_df.head(25)
-    st.dataframe(recent[cols] if cols else recent, use_container_width=True, hide_index=True)
+    display = recent[display_cols] if display_cols else recent
+    if "total" in display.columns:
+        display = display.assign(
+            total=display["total"].fillna(0).map(lambda v: f"${v:,.2f}")
+        )
+    display = display.rename(
+        columns={
+            "jobStatus": "Status",
+            "createdOn": "Created",
+            "completedOn": "Completed",
+            "total": "Invoice amount",
+            "summary": "Summary",
+        }
+    )
+    st.dataframe(display, use_container_width=True, hide_index=True)
 else:
     st.info("No jobs to show.")
