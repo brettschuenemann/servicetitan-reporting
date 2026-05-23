@@ -129,6 +129,25 @@ CREATE INDEX IF NOT EXISTS ix_estimates_status      ON estimates(status_name);
 CREATE INDEX IF NOT EXISTS ix_estimates_modified_on ON estimates(modified_on);
 CREATE INDEX IF NOT EXISTS ix_estimates_customer    ON estimates(customer_id);
 
+CREATE TABLE IF NOT EXISTS appointment_assignments (
+    id                   BIGINT PRIMARY KEY,
+    technician_id        BIGINT,
+    technician_name      TEXT,
+    job_id               BIGINT,
+    appointment_id       BIGINT,
+    assigned_on          TIMESTAMPTZ,
+    status               TEXT,
+    is_paused            BOOLEAN,
+    active               BOOLEAN,
+    created_on           TIMESTAMPTZ,
+    modified_on          TIMESTAMPTZ,
+    raw                  JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_appt_assigns_tech       ON appointment_assignments(technician_id);
+CREATE INDEX IF NOT EXISTS ix_appt_assigns_job        ON appointment_assignments(job_id);
+CREATE INDEX IF NOT EXISTS ix_appt_assigns_assigned   ON appointment_assignments(assigned_on);
+CREATE INDEX IF NOT EXISTS ix_appt_assigns_modified   ON appointment_assignments(modified_on);
+
 CREATE TABLE IF NOT EXISTS calls (
     id                   BIGINT PRIMARY KEY,
     received_on          TIMESTAMPTZ,

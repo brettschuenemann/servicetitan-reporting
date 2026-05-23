@@ -538,6 +538,70 @@ def sync_calls(
     return {"upserted": len(calls), "total": total}
 
 
+def sync_appointment_assignments(
+    client: ServiceTitanClient,
+    conn: psycopg2.extensions.connection,
+    progress: ProgressCallback = _noop,
+) -> dict:
+    state = get_sync_state(conn, "appointment_assignments")
+    since = state["last_modified_on"] if state else None
+    progress(f"Fetching appointment-assignments{' since ' + since if since else ' (full)'}…")
+    assigns = client.get_appointment_assignments(modified_after=since)
+    progress(f"Got {len(assigns)} assignments. Writing to DB…")
+
+    max_modified = since
+    rows = []
+    for a in assigns:
+        modified_on = a.get("modifiedOn")
+        max_modified = _maxstr(max_modified, modified_on)
+        rows.append((
+            a["id"],
+            a.get("technicianId"),
+            a.get("technicianName"),
+            a.get("jobId"),
+            a.get("appointmentId"),
+            a.get("assignedOn"),
+            a.get("status"),
+            bool(a.get("isPaused")),
+            bool(a.get("active")),
+            a.get("createdOn"),
+            modified_on,
+            json.dumps(a),
+        ))
+
+    if rows:
+        with conn.cursor() as cur:
+            execute_values(
+                cur,
+                """
+                INSERT INTO appointment_assignments (
+                    id, technician_id, technician_name, job_id, appointment_id,
+                    assigned_on, status, is_paused, active,
+                    created_on, modified_on, raw
+                ) VALUES %s
+                ON CONFLICT (id) DO UPDATE SET
+                    technician_id=EXCLUDED.technician_id,
+                    technician_name=EXCLUDED.technician_name,
+                    job_id=EXCLUDED.job_id, appointment_id=EXCLUDED.appointment_id,
+                    assigned_on=EXCLUDED.assigned_on, status=EXCLUDED.status,
+                    is_paused=EXCLUDED.is_paused, active=EXCLUDED.active,
+                    created_on=EXCLUDED.created_on, modified_on=EXCLUDED.modified_on,
+                    raw=EXCLUDED.raw
+                """,
+                rows,
+                template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                page_size=500,
+            )
+        conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM appointment_assignments")
+        total = cur.fetchone()["n"]
+    set_sync_state(conn, "appointment_assignments", max_modified, total)
+    progress(f"Appointment-assignments synced. {len(assigns)} touched, {total} total.")
+    return {"upserted": len(assigns), "total": total}
+
+
 def sync_all(
     client: ServiceTitanClient,
     conn: psycopg2.extensions.connection,
@@ -549,6 +613,7 @@ def sync_all(
     job_stats = sync_jobs(client, conn, progress)
     cmp_stats = sync_campaigns(client, conn, progress)
     call_stats = sync_calls(client, conn, progress)
+    appt_stats = sync_appointment_assignments(client, conn, progress)
     return {
         "invoices": inv_stats,
         "memberships": mem_stats,
@@ -556,4 +621,5 @@ def sync_all(
         "jobs": job_stats,
         "campaigns": cmp_stats,
         "calls": call_stats,
+        "appointment_assignments": appt_stats,
     }

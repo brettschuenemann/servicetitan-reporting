@@ -192,6 +192,15 @@ class ServiceTitanClient:
         path = f"/telecom/v3/tenant/{self.tenant_id}/calls"
         return list(self._paginate(path, params))
 
+    def get_appointment_assignments(
+        self, modified_after: str | None = None
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {}
+        if modified_after:
+            params["modifiedOnOrAfter"] = modified_after
+        path = f"/dispatch/v2/tenant/{self.tenant_id}/appointment-assignments"
+        return list(self._paginate(path, params))
+
     def get_estimates(
         self,
         created_after: str | None = None,
