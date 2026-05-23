@@ -6,7 +6,10 @@ from datetime import date, timedelta
 import plotly.express as px
 import streamlit as st
 
+import pandas as pd
+
 from lib.auth import require_password
+from lib.database import db
 from lib.loaders import load_jobs
 from lib.reporting import jobs_to_dataframe
 from lib.style import apply_mobile_styles, chart_height
@@ -62,26 +65,46 @@ if "createdOn" in filtered.columns:
     st.plotly_chart(fig, use_container_width=True)
 
 st.subheader(f"{len(filtered):,} jobs")
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _customer_name_map() -> dict[int, str]:
+    """customer_id → customer_name from cached invoices."""
+    with db() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT customer_id, MIN(customer_name) AS name FROM invoices "
+            "WHERE customer_name IS NOT NULL GROUP BY customer_id"
+        )
+        return {r["customer_id"]: r["name"] for r in cur.fetchall()}
+
+
+cust_lookup = _customer_name_map()
+display = filtered.copy()
+if "customerId" in display.columns:
+    display["customer"] = display["customerId"].map(
+        lambda cid: cust_lookup.get(cid, f"cust {cid}" if cid else "")
+    )
+if "total" in display.columns:
+    display["value"] = display["total"].fillna(0).map(lambda v: f"${v:,.2f}")
+
 display_cols = [
     c
-    for c in (
-        "id",
-        "jobNumber",
-        "jobStatus",
-        "createdOn",
-        "completedOn",
-        "customerId",
-        "locationId",
-        "businessUnitId",
-        "summary",
-    )
-    if c in filtered.columns
+    for c in ("jobNumber", "jobStatus", "createdOn", "completedOn",
+              "customer", "value", "summary")
+    if c in display.columns
 ]
-st.dataframe(
-    filtered[display_cols] if display_cols else filtered,
-    use_container_width=True,
-    hide_index=True,
+table = display[display_cols].rename(
+    columns={
+        "jobNumber": "Job #",
+        "jobStatus": "Status",
+        "createdOn": "Created",
+        "completedOn": "Completed",
+        "customer": "Customer",
+        "value": "Value",
+        "summary": "Summary",
+    }
 )
+st.dataframe(table, use_container_width=True, hide_index=True)
 
 csv = filtered.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, file_name="jobs.csv", mime="text/csv")
