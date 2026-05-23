@@ -179,6 +179,19 @@ class ServiceTitanClient:
         path = f"/jpm/v2/tenant/{self.tenant_id}/jobs"
         return list(self._paginate(path, params))
 
+    def get_calls(
+        self,
+        created_after: str | None = None,
+        modified_after: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {}
+        if created_after:
+            params["createdAfter"] = created_after
+        if modified_after:
+            params["modifiedAfter"] = modified_after
+        path = f"/telecom/v3/tenant/{self.tenant_id}/calls"
+        return list(self._paginate(path, params))
+
     def get_estimates(
         self,
         created_after: str | None = None,

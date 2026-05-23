@@ -428,6 +428,116 @@ def sync_jobs(
     return {"upserted": len(jobs), "total": total_rows}
 
 
+def _parse_duration_to_seconds(d: str | None) -> int | None:
+    """HH:MM:SS string → integer seconds. Returns None if unparseable."""
+    if not d:
+        return None
+    parts = d.split(":")
+    if len(parts) != 3:
+        return None
+    try:
+        return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
+    except ValueError:
+        return None
+
+
+def sync_calls(
+    client: ServiceTitanClient,
+    conn: psycopg2.extensions.connection,
+    progress: ProgressCallback = _noop,
+) -> dict:
+    state = get_sync_state(conn, "calls")
+    since = state["last_modified_on"] if state else None
+    progress(f"Fetching calls{' since ' + since if since else ' (full)'}…")
+    # Full sync uses createdAfter = epoch; incremental uses modifiedAfter
+    if since:
+        calls = client.get_calls(modified_after=since)
+    else:
+        calls = client.get_calls(created_after="2020-01-01T00:00:00Z")
+    progress(f"Got {len(calls)} call records. Writing to DB…")
+
+    max_modified = since
+    rows = []
+    for call in calls:
+        lc = call.get("leadCall") or {}
+        agent = lc.get("agent") or {}
+        customer = lc.get("customer") or {}
+        campaign = lc.get("campaign") or {}
+        bu = call.get("businessUnit") or {}
+        reason = lc.get("reason")
+        reason_name = reason.get("name") if isinstance(reason, dict) else reason
+        modified_on = lc.get("modifiedOn") or call.get("modifiedOn")
+        max_modified = _maxstr(max_modified, modified_on)
+        wrapper_id = call.get("id")
+        job_id = wrapper_id if (call.get("jobNumber") and wrapper_id) else None
+        rows.append((
+            lc.get("id") or wrapper_id,
+            lc.get("receivedOn"),
+            lc.get("createdOn"),
+            modified_on,
+            lc.get("direction"),
+            lc.get("callType"),
+            _parse_duration_to_seconds(lc.get("duration")),
+            lc.get("from"),
+            lc.get("to"),
+            agent.get("id"),
+            agent.get("name"),
+            customer.get("id"),
+            customer.get("name"),
+            campaign.get("id"),
+            campaign.get("name"),
+            job_id,
+            call.get("jobNumber"),
+            bu.get("id"),
+            bu.get("name"),
+            lc.get("recordingUrl"),
+            lc.get("voiceMailUrl"),
+            reason_name,
+            json.dumps(call),
+        ))
+
+    if rows:
+        with conn.cursor() as cur:
+            execute_values(
+                cur,
+                """
+                INSERT INTO calls (
+                    id, received_on, created_on, modified_on,
+                    direction, call_type, duration_seconds, from_phone, to_phone,
+                    agent_id, agent_name, customer_id, customer_name,
+                    campaign_id, campaign_name, job_id, job_number,
+                    business_unit_id, business_unit_name,
+                    recording_url, voicemail_url, reason, raw
+                ) VALUES %s
+                ON CONFLICT (id) DO UPDATE SET
+                    received_on=EXCLUDED.received_on, created_on=EXCLUDED.created_on,
+                    modified_on=EXCLUDED.modified_on,
+                    direction=EXCLUDED.direction, call_type=EXCLUDED.call_type,
+                    duration_seconds=EXCLUDED.duration_seconds,
+                    from_phone=EXCLUDED.from_phone, to_phone=EXCLUDED.to_phone,
+                    agent_id=EXCLUDED.agent_id, agent_name=EXCLUDED.agent_name,
+                    customer_id=EXCLUDED.customer_id, customer_name=EXCLUDED.customer_name,
+                    campaign_id=EXCLUDED.campaign_id, campaign_name=EXCLUDED.campaign_name,
+                    job_id=EXCLUDED.job_id, job_number=EXCLUDED.job_number,
+                    business_unit_id=EXCLUDED.business_unit_id,
+                    business_unit_name=EXCLUDED.business_unit_name,
+                    recording_url=EXCLUDED.recording_url, voicemail_url=EXCLUDED.voicemail_url,
+                    reason=EXCLUDED.reason, raw=EXCLUDED.raw
+                """,
+                rows,
+                template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                page_size=500,
+            )
+        conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM calls")
+        total = cur.fetchone()["n"]
+    set_sync_state(conn, "calls", max_modified, total)
+    progress(f"Calls synced. {len(calls)} touched, {total} total in cache.")
+    return {"upserted": len(calls), "total": total}
+
+
 def sync_all(
     client: ServiceTitanClient,
     conn: psycopg2.extensions.connection,
@@ -438,10 +548,12 @@ def sync_all(
     est_stats = sync_estimates(client, conn, progress)
     job_stats = sync_jobs(client, conn, progress)
     cmp_stats = sync_campaigns(client, conn, progress)
+    call_stats = sync_calls(client, conn, progress)
     return {
         "invoices": inv_stats,
         "memberships": mem_stats,
         "estimates": est_stats,
         "jobs": job_stats,
         "campaigns": cmp_stats,
+        "calls": call_stats,
     }

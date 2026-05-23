@@ -43,7 +43,8 @@ Required sections (use these markdown headers):
 2. **What's Working** — wins, momentum, concentration
 3. **What's Concerning** — risks, leaks, stale pipeline
 4. **PPC Performance** — dedicated section on Pay Per Click using the PPC data provided. Interpret the *funnel* (estimates sent → won/lost/open, jobs paid vs $0, conversion rates). Comment on whether PPC is paying off, getting better/worse, or has a specific bottleneck (e.g. low estimate win rate vs low job conversion are different problems).
-5. **Do This Week** — 2-3 specific actions tied to dollar amounts"""
+5. **Phone Room** — dedicated section on call performance. Look for concentration risk (one CSR handling most calls), missed revenue (abandoned calls), and bench depth (booking rate gap between top CSR and others). Don't penalize CSRs for Excused/NotLead — focus on the bookable-calls booking rate.
+6. **Do This Week** — 2-3 specific actions tied to dollar amounts"""
 
 
 def _gather_metrics(end: date, window_days: int = SUMMARY_DAYS) -> dict:
@@ -179,6 +180,27 @@ def _gather_metrics(end: date, window_days: int = SUMMARY_DAYS) -> dict:
         )
         ppc_estimates_lifetime = {r["status_name"]: dict(r) for r in cur.fetchall()}
 
+        # ---------- Phone room (calls) ----------
+        cur.execute(
+            "SELECT call_type, COUNT(*) n FROM calls "
+            "WHERE direction = 'Inbound' AND created_on::date BETWEEN %s AND %s "
+            "GROUP BY call_type",
+            (start, end),
+        )
+        call_types = {r["call_type"]: int(r["n"]) for r in cur.fetchall()}
+
+        cur.execute(
+            "SELECT agent_name, COUNT(*) total, "
+            "  COUNT(*) FILTER (WHERE call_type='Booked') booked, "
+            "  COUNT(*) FILTER (WHERE call_type IN ('Booked','Unbooked','Abandoned')) bookable "
+            "FROM calls "
+            "WHERE direction='Inbound' AND agent_name IS NOT NULL "
+            "  AND created_on::date BETWEEN %s AND %s "
+            "GROUP BY agent_name ORDER BY total DESC LIMIT 5",
+            (start, end),
+        )
+        csr_perf = [dict(r) for r in cur.fetchall()]
+
     return {
         "window_days": window_days,
         "start": start,
@@ -197,6 +219,8 @@ def _gather_metrics(end: date, window_days: int = SUMMARY_DAYS) -> dict:
         "ppc_estimates_window": ppc_estimates_window,
         "ppc_open_now": ppc_open_now,
         "ppc_estimates_lifetime": ppc_estimates_lifetime,
+        "call_types": call_types,
+        "csr_perf": csr_perf,
     }
 
 
@@ -326,6 +350,38 @@ def _format_user_prompt(m: dict) -> str:
         )
     else:
         lines.append("    - (no PPC estimates on record)")
+
+    # ---------- Phone Room section ----------
+    ct = m["call_types"]
+    booked = ct.get("Booked", 0)
+    unbooked = ct.get("Unbooked", 0)
+    abandoned = ct.get("Abandoned", 0)
+    excused = ct.get("Excused", 0)
+    not_lead = ct.get("NotLead", 0)
+    total_inbound = sum(ct.values())
+    bookable = booked + unbooked + abandoned
+    book_rate = (booked / bookable * 100) if bookable else 0
+
+    lines += [
+        "",
+        "PHONE ROOM (last {} days, inbound only)".format(n),
+        f"- Total inbound calls: {total_inbound}",
+        f"- Booked: {booked}   Unbooked: {unbooked}   Abandoned: {abandoned}   Excused: {excused}   NotLead: {not_lead}",
+        f"- Booking rate (Booked / Bookable, where Bookable = Booked+Unbooked+Abandoned): {book_rate:.0f}%",
+        f"  Note: Abandoned calls ({abandoned}) are missed revenue — customer hung up before a CSR closed.",
+        "- CSR breakdown:",
+    ]
+    if m["csr_perf"]:
+        for row in m["csr_perf"]:
+            bk = int(row["booked"])
+            bkable = int(row["bookable"])
+            rate = (bk / bkable * 100) if bkable else 0
+            lines.append(
+                f"    - {row['agent_name']}: {row['total']} calls, "
+                f"{bk}/{bkable} bookable booked ({rate:.0f}%)"
+            )
+    else:
+        lines.append("    - (no agent-assigned calls in window)")
 
     return "\n".join(lines)
 

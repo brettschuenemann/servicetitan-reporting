@@ -129,6 +129,37 @@ CREATE INDEX IF NOT EXISTS ix_estimates_status      ON estimates(status_name);
 CREATE INDEX IF NOT EXISTS ix_estimates_modified_on ON estimates(modified_on);
 CREATE INDEX IF NOT EXISTS ix_estimates_customer    ON estimates(customer_id);
 
+CREATE TABLE IF NOT EXISTS calls (
+    id                   BIGINT PRIMARY KEY,
+    received_on          TIMESTAMPTZ,
+    created_on           TIMESTAMPTZ,
+    modified_on          TIMESTAMPTZ,
+    direction            TEXT,
+    call_type            TEXT,
+    duration_seconds     INTEGER,
+    from_phone           TEXT,
+    to_phone             TEXT,
+    agent_id             BIGINT,
+    agent_name           TEXT,
+    customer_id          BIGINT,
+    customer_name        TEXT,
+    campaign_id          BIGINT,
+    campaign_name        TEXT,
+    job_id               BIGINT,
+    job_number           TEXT,
+    business_unit_id     BIGINT,
+    business_unit_name   TEXT,
+    recording_url        TEXT,
+    voicemail_url        TEXT,
+    reason               TEXT,
+    raw                  JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_calls_received_on  ON calls(received_on);
+CREATE INDEX IF NOT EXISTS ix_calls_modified_on  ON calls(modified_on);
+CREATE INDEX IF NOT EXISTS ix_calls_agent        ON calls(agent_id);
+CREATE INDEX IF NOT EXISTS ix_calls_customer     ON calls(customer_id);
+CREATE INDEX IF NOT EXISTS ix_calls_call_type    ON calls(call_type);
+
 CREATE TABLE IF NOT EXISTS sync_state (
     entity            TEXT PRIMARY KEY,
     last_modified_on  TEXT,
