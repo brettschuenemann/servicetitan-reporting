@@ -1,7 +1,7 @@
 """Revenue report — trend, top business units, top customers, CSV export."""
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 
 import plotly.express as px
 import streamlit as st
@@ -19,7 +19,7 @@ st.title("Revenue report")
 with st.sidebar:
     st.header("Filters")
     today = date.today()
-    start = st.date_input("From", today - timedelta(days=30))
+    start = st.date_input("From", today.replace(day=1))   # month-to-date by default
     end = st.date_input("To", today)
     granularity = st.radio("Granularity", ("Day", "Week", "Month"), horizontal=True)
 
