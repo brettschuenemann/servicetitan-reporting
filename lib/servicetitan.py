@@ -163,3 +163,19 @@ class ServiceTitanClient:
     def get_membership_invoice_template(self, template_id: int) -> dict[str, Any]:
         path = f"/memberships/v2/tenant/{self.tenant_id}/invoice-templates/{template_id}"
         return self._request(path)
+
+    def get_estimates(
+        self,
+        created_after: str | None = None,
+        created_before: str | None = None,
+        modified_after: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {}
+        if created_after:
+            params["createdOnOrAfter"] = created_after
+        if created_before:
+            params["createdBefore"] = created_before
+        if modified_after:
+            params["modifiedOnOrAfter"] = modified_after
+        path = f"/sales/v2/tenant/{self.tenant_id}/estimates"
+        return list(self._paginate(path, params))

@@ -68,6 +68,31 @@ CREATE TABLE IF NOT EXISTS membership_templates (
     raw    JSONB NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS estimates (
+    id                   BIGINT PRIMARY KEY,
+    status_name          TEXT,
+    status_value         INTEGER,
+    name                 TEXT,
+    summary              TEXT,
+    subtotal             DOUBLE PRECISION,
+    tax                  DOUBLE PRECISION,
+    created_on           TIMESTAMPTZ,
+    modified_on          TIMESTAMPTZ,
+    sold_on              TIMESTAMPTZ,
+    sold_by_id           BIGINT,
+    customer_id          BIGINT,
+    location_id          BIGINT,
+    business_unit_id     BIGINT,
+    business_unit_name   TEXT,
+    job_id               BIGINT,
+    job_number           TEXT,
+    active               BOOLEAN,
+    raw                  JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_estimates_status      ON estimates(status_name);
+CREATE INDEX IF NOT EXISTS ix_estimates_modified_on ON estimates(modified_on);
+CREATE INDEX IF NOT EXISTS ix_estimates_customer    ON estimates(customer_id);
+
 CREATE TABLE IF NOT EXISTS sync_state (
     entity            TEXT PRIMARY KEY,
     last_modified_on  TEXT,

@@ -230,6 +230,85 @@ def sync_memberships(
     return {"memberships": total, "new_templates": len(needed)}
 
 
+def sync_estimates(
+    client: ServiceTitanClient,
+    conn: psycopg2.extensions.connection,
+    progress: ProgressCallback = _noop,
+) -> dict:
+    state = get_sync_state(conn, "estimates")
+    since = state["last_modified_on"] if state else None
+    progress(f"Fetching estimates{' since ' + since if since else ' (full)'}…")
+    estimates = (
+        client.get_estimates(modified_after=since) if since else client.get_estimates()
+    )
+    progress(f"Got {len(estimates)} estimates. Writing to DB…")
+
+    max_modified = since
+    rows = []
+    for e in estimates:
+        status = e.get("status") or {}
+        sold_by = e.get("soldBy") or {}
+        modified_on = e.get("modifiedOn")
+        max_modified = _maxstr(max_modified, modified_on)
+        rows.append((
+            e["id"],
+            status.get("name") if isinstance(status, dict) else status,
+            status.get("value") if isinstance(status, dict) else None,
+            e.get("name"),
+            e.get("summary"),
+            _safe_float(e.get("subtotal")),
+            _safe_float(e.get("tax")),
+            e.get("createdOn"),
+            modified_on,
+            e.get("soldOn"),
+            sold_by.get("id") if isinstance(sold_by, dict) else sold_by,
+            e.get("customerId"),
+            e.get("locationId"),
+            e.get("businessUnitId"),
+            e.get("businessUnitName"),
+            e.get("jobId"),
+            e.get("jobNumber"),
+            bool(e.get("active")),
+            json.dumps(e),
+        ))
+
+    if rows:
+        with conn.cursor() as cur:
+            execute_values(
+                cur,
+                """
+                INSERT INTO estimates (
+                    id, status_name, status_value, name, summary, subtotal, tax,
+                    created_on, modified_on, sold_on, sold_by_id,
+                    customer_id, location_id, business_unit_id, business_unit_name,
+                    job_id, job_number, active, raw
+                ) VALUES %s
+                ON CONFLICT (id) DO UPDATE SET
+                    status_name=EXCLUDED.status_name, status_value=EXCLUDED.status_value,
+                    name=EXCLUDED.name, summary=EXCLUDED.summary,
+                    subtotal=EXCLUDED.subtotal, tax=EXCLUDED.tax,
+                    created_on=EXCLUDED.created_on, modified_on=EXCLUDED.modified_on,
+                    sold_on=EXCLUDED.sold_on, sold_by_id=EXCLUDED.sold_by_id,
+                    customer_id=EXCLUDED.customer_id, location_id=EXCLUDED.location_id,
+                    business_unit_id=EXCLUDED.business_unit_id,
+                    business_unit_name=EXCLUDED.business_unit_name,
+                    job_id=EXCLUDED.job_id, job_number=EXCLUDED.job_number,
+                    active=EXCLUDED.active, raw=EXCLUDED.raw
+                """,
+                rows,
+                template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                page_size=500,
+            )
+        conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM estimates")
+        total_rows = cur.fetchone()["n"]
+    set_sync_state(conn, "estimates", max_modified, total_rows)
+    progress(f"Estimates synced. {len(estimates)} touched, {total_rows} total in cache.")
+    return {"upserted": len(estimates), "total": total_rows}
+
+
 def sync_all(
     client: ServiceTitanClient,
     conn: psycopg2.extensions.connection,
@@ -237,4 +316,5 @@ def sync_all(
 ) -> dict:
     inv_stats = sync_invoices(client, conn, progress)
     mem_stats = sync_memberships(client, conn, progress)
-    return {"invoices": inv_stats, "memberships": mem_stats}
+    est_stats = sync_estimates(client, conn, progress)
+    return {"invoices": inv_stats, "memberships": mem_stats, "estimates": est_stats}
