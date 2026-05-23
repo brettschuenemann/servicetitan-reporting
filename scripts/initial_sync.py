@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dotenv import load_dotenv
 
-from lib.database import get_connection
+from lib.database import db
 from lib.servicetitan import ServiceTitanClient
 from lib.sync import sync_all
 
@@ -21,8 +21,8 @@ client = ServiceTitanClient(
     environment=os.environ.get("ST_ENVIRONMENT", "production"),
 )
 
-conn = get_connection()
 start = time.time()
-stats = sync_all(client, conn, progress=lambda m: print(f"  · {m}"))
+with db() as conn:
+    stats = sync_all(client, conn, progress=lambda m: print(f"  · {m}"))
 print(f"\nDone in {time.time() - start:.1f}s")
 print(f"Stats: {stats}")

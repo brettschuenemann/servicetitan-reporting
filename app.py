@@ -15,9 +15,9 @@ import plotly.express as px
 import streamlit as st
 
 from lib.auth import require_password
+from lib.database import db
 from lib.loaders import (
     get_client,
-    get_db,
     load_invoices,
     load_jobs,
     load_memberships_with_billing,
@@ -53,11 +53,11 @@ st.caption(
     "Reconciles with the accountant's P&L to within 0.5% over Jan 2024 – Sep 2025."
 )
 
-# First-time setup: populate the SQLite cache if it's empty (e.g., fresh deploy).
-_conn = get_db()
-_already_synced = _conn.execute(
-    "SELECT COUNT(*) FROM sync_state WHERE entity = 'invoices'"
-).fetchone()[0]
+# First-time setup: populate Postgres if it's empty (e.g., fresh DB).
+with db() as _conn:
+    with _conn.cursor() as _cur:
+        _cur.execute("SELECT COUNT(*) AS n FROM sync_state WHERE entity = 'invoices'")
+        _already_synced = _cur.fetchone()["n"]
 if not _already_synced:
     st.warning(
         "First-time setup detected. Syncing data from ServiceTitan — this takes "
@@ -65,7 +65,8 @@ if not _already_synced:
     )
     progress_box = st.empty()
     try:
-        sync_all(get_client(), _conn, progress=lambda m: progress_box.info(m))
+        with db() as _conn:
+            sync_all(get_client(), _conn, progress=lambda m: progress_box.info(m))
         progress_box.success("Initial sync complete. Reloading…")
         st.cache_data.clear()
         st.rerun()
@@ -101,19 +102,28 @@ def pick_date_range() -> tuple[date, date]:
 with st.sidebar:
     st.divider()
     st.header("Data cache")
-    sync_rows = get_db().execute(
-        "SELECT entity, last_sync_at, row_count FROM sync_state ORDER BY entity"
-    ).fetchall()
+    try:
+        with db() as _conn:
+            with _conn.cursor() as _cur:
+                _cur.execute(
+                    "SELECT entity, last_sync_at, row_count FROM sync_state ORDER BY entity"
+                )
+                sync_rows = _cur.fetchall()
+    except Exception as _exc:
+        sync_rows = []
+        st.error(f"Cannot reach Postgres: {_exc}")
+
     if sync_rows:
         for r in sync_rows:
             st.caption(f"**{r['entity']}**: {r['row_count']:,} rows · synced {r['last_sync_at']}")
-    else:
+    elif sync_rows == []:
         st.warning("No data cached. Click below to sync.")
 
     if st.button("Sync from ServiceTitan", use_container_width=True):
         progress_box = st.empty()
         try:
-            sync_all(get_client(), get_db(), progress=lambda m: progress_box.info(m))
+            with db() as _conn:
+                sync_all(get_client(), _conn, progress=lambda m: progress_box.info(m))
             progress_box.success("Sync complete.")
             st.cache_data.clear()
         except Exception as exc:

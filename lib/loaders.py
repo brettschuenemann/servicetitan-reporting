@@ -1,7 +1,7 @@
-"""Streamlit-cached loaders so each page shares one client and one cache.
+"""Streamlit-cached loaders backed by the Postgres cache.
 
-Invoices and memberships come from the local SQLite cache (see `lib/database.py`
-and `lib/sync.py`). Jobs and reference data still hit the API directly.
+Invoices and memberships come from the database (see `lib/database.py` and
+`lib/sync.py`). Jobs and reference data still hit the ServiceTitan API directly.
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from datetime import date, timedelta
 import streamlit as st
 from dotenv import load_dotenv
 
-from .database import get_connection
+from .database import db
 from .servicetitan import ServiceTitanClient
 
 load_dotenv()
@@ -62,20 +62,18 @@ def load_jobs(start: date, end: date) -> list[dict]:
     )
 
 
-@st.cache_resource(show_spinner=False)
-def get_db():
-    return get_connection()
-
-
 @st.cache_data(ttl=120, show_spinner=False)
 def load_invoices(start: date, end: date) -> list[dict]:
-    """Return invoices whose invoiceDate falls in [start, end], from the local cache."""
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT raw FROM invoices WHERE invoice_date BETWEEN ? AND ? ORDER BY invoice_date",
-        (start.isoformat(), end.isoformat()),
-    ).fetchall()
-    return [json.loads(r["raw"]) for r in rows]
+    """Return invoices whose invoiceDate falls in [start, end], from the Postgres cache."""
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT raw FROM invoices WHERE invoice_date BETWEEN %s AND %s "
+                "ORDER BY invoice_date",
+                (start, end),
+            )
+            rows = cur.fetchall()
+    return [r["raw"] for r in rows]  # JSONB comes back already-parsed
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -92,15 +90,15 @@ def load_technicians() -> dict[int, str]:
 
 @st.cache_data(ttl=120, show_spinner=False)
 def load_memberships_with_billing() -> list[dict]:
-    """Every membership annotated with `billingAmount`, from the local cache."""
-    conn = get_db()
-    rows = conn.execute(
-        "SELECT raw, billing_amount FROM memberships"
-    ).fetchall()
+    """Every membership annotated with `billingAmount`, from the Postgres cache."""
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT raw, billing_amount FROM memberships")
+            rows = cur.fetchall()
     out = []
     for r in rows:
-        m = json.loads(r["raw"])
-        m["billingAmount"] = r["billing_amount"] or 0.0
+        m = r["raw"]  # JSONB
+        m["billingAmount"] = float(r["billing_amount"] or 0)
         out.append(m)
     return out
 
@@ -117,10 +115,7 @@ def membership_revenue_in_range(memberships: list[dict], start: date, end: date)
 
 
 def memberships_to_monthly_revenue(memberships: list[dict]) -> list[dict]:
-    """Flatten memberships into per-row revenue dicts: {date, total} for charting.
-
-    Each membership contributes one row at its `from` date with `billingAmount` as `total`.
-    """
+    """Flatten memberships into per-row revenue dicts: {date, total} for charting."""
     rows = []
     for m in memberships:
         frm = (m.get("from") or "")[:10]

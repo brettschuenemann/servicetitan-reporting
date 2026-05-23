@@ -1,6 +1,6 @@
 # ServiceTitan Reporting
 
-A Streamlit dashboard that reports on Jobs and Revenue from the ServiceTitan API, backed by a local SQLite cache.
+A Streamlit dashboard that reports on Jobs and Revenue from the ServiceTitan API, backed by a Postgres cache.
 
 ## What's inside
 
@@ -19,14 +19,16 @@ Revenue is computed as the sum of invoice totals by `invoiceDate`. This matches 
    pip install -r requirements.txt
    ```
 
-2. Copy `.env.example` to `.env` and fill in your ServiceTitan credentials. You need an integration app in the [ServiceTitan developer portal](https://developer.servicetitan.io) with **JPM** + **Accounting** + **Memberships** scopes enabled.
+2. **Provision a Postgres database.** [Neon](https://neon.tech) is recommended — free tier, serverless, takes ~2 minutes to set up. Sign up, create a project, copy the connection string (looks like `postgresql://user:pass@ep-xxx.us-east-1.aws.neon.tech/neondb?sslmode=require`).
 
-3. Populate the local SQLite cache (takes ~5 minutes on first run; ~10 seconds on incremental):
+3. Copy `.env.example` to `.env` and fill in your ServiceTitan credentials + `DATABASE_URL`. You need an integration app in the [ServiceTitan developer portal](https://developer.servicetitan.io) with **JPM** + **Accounting** + **Memberships** scopes enabled.
+
+4. Populate the Postgres cache (takes ~5 minutes on first run; ~10 seconds on incremental):
    ```bash
    python scripts/initial_sync.py
    ```
 
-4. Run the app:
+5. Run the app:
    ```bash
    streamlit run app.py
    ```
@@ -39,6 +41,7 @@ Credentials and secrets are loaded from `st.secrets` (cloud) or `os.environ` (lo
 | Key | Description |
 | --- | --- |
 | `app_password` | Shared password for the Streamlit gate. If unset, the app is open. |
+| `DATABASE_URL` | Postgres connection string. Get one from [Neon](https://neon.tech) (free). |
 | `ST_APP_KEY` | App key from the integration app (sent as `ST-App-Key` header). |
 | `ST_TENANT_ID` | Your tenant ID (numeric). |
 | `ST_CLIENT_ID` | OAuth client ID. |
@@ -70,7 +73,7 @@ Streamlit Community Cloud (free) is the simplest path for a 2-5 person internal 
 
 5. **Set secrets:** In the deployed app's settings → **Secrets**, paste the contents of `.streamlit/secrets.toml.example` (with real values). Save. The app will restart.
 
-6. **First load:** The very first visitor will see "First-time setup detected. Syncing data from ServiceTitan…" with a progress log. After ~5 minutes the SQLite cache is built and the dashboard loads. Subsequent visits are instant until the container restarts.
+6. **First load:** If the Postgres cache is empty, the first visitor sees "First-time setup detected. Syncing data from ServiceTitan…" with a progress log. After ~5 minutes the cache is built and the dashboard loads. Postgres persists across deploys, so this only happens once (or after data is wiped manually).
 
 ### Sharing access
 
@@ -79,13 +82,12 @@ Share the app URL with your team and tell them the password from `app_password`.
 ### Ongoing maintenance
 
 - **Refreshing data:** Click **Sync from ServiceTitan** in the sidebar. Incremental sync takes ~10 seconds.
-- **Updating code:** Push to your main branch on GitHub. Streamlit auto-redeploys. The DB gets wiped on redeploy and re-syncs automatically on first load (~5 min).
-- **If you want persistent storage across deploys** (skip the 5-min re-sync after every push): switch hosts to Render or Fly.io with a 1 GB persistent volume mounted at `data/`, or modify the sync to push/pull the `.db` file to S3/R2 between deploys.
+- **Updating code:** Push to your main branch on GitHub. Streamlit auto-redeploys. The Postgres data persists, so no re-sync needed.
 
 ## How caching works
 
 - The OAuth access token is cached in-process until ~1 minute before it expires.
-- All ServiceTitan data lives in `data/servicetitan.db` (SQLite). Reads from the dashboard hit the DB, not the API.
+- All ServiceTitan data lives in Postgres (`DATABASE_URL`). Reads from the dashboard hit the DB, not the API.
 - Sync logic is in [`lib/sync.py`](lib/sync.py); incremental for invoices (via `modifiedOnOrAfter`), full refresh for memberships, fetch-once for billing templates.
 
 ## Extending
