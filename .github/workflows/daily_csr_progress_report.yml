@@ -27,6 +27,11 @@ jobs:
 
       - name: Send EOD progress report
         env:
+          ST_APP_KEY: ${{ secrets.ST_APP_KEY }}
+          ST_TENANT_ID: ${{ secrets.ST_TENANT_ID }}
+          ST_CLIENT_ID: ${{ secrets.ST_CLIENT_ID }}
+          ST_CLIENT_SECRET: ${{ secrets.ST_CLIENT_SECRET }}
+          ST_ENVIRONMENT: ${{ secrets.ST_ENVIRONMENT }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}

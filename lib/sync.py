@@ -735,6 +735,37 @@ def sync_appointment_assignments(
     return {"upserted": len(assigns), "total": total}
 
 
+def sync_for_email(
+    client: ServiceTitanClient,
+    conn: psycopg2.extensions.connection,
+    progress: ProgressCallback = _noop,
+) -> dict:
+    """Best-effort incremental sync used right before sending an email.
+
+    Pulls everything modified since the last sync (handled internally by
+    each entity's sync_state). Failures are logged but don't raise — we
+    always want the email to go out, even if ST is temporarily unhappy.
+    Email runs against whatever data was successfully fetched.
+    """
+    results: dict[str, dict] = {}
+    steps = [
+        ("invoices", sync_invoices),
+        ("estimates", sync_estimates),
+        ("jobs", sync_jobs),
+        ("campaigns", sync_campaigns),
+        ("calls", sync_calls),
+        ("appointment_assignments", sync_appointment_assignments),
+        ("memberships", sync_memberships),
+    ]
+    for name, fn in steps:
+        try:
+            results[name] = fn(client, conn, progress)
+        except Exception as exc:
+            progress(f"sync {name} failed (non-fatal): {exc}")
+            results[name] = {"error": str(exc)}
+    return results
+
+
 def sync_all(
     client: ServiceTitanClient,
     conn: psycopg2.extensions.connection,

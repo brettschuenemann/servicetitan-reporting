@@ -29,7 +29,7 @@ load_dotenv()
 from lib.database import db  # noqa: E402
 from lib.email_utils import header as fmt_recipients, parse_recipients  # noqa: E402
 from lib.servicetitan import ServiceTitanClient  # noqa: E402
-from lib.sync import sync_estimates  # noqa: E402
+from lib.sync import sync_for_email  # noqa: E402
 
 REQUIRED = (
     "SMTP_USER", "SMTP_PASSWORD", "EMAIL_TO",
@@ -58,9 +58,9 @@ def main() -> int:
         client_id=os.environ["ST_CLIENT_ID"], client_secret=os.environ["ST_CLIENT_SECRET"],
     )
 
-    print("Syncing latest estimates…")
+    print("Pre-email sync (incremental, all entities)…")
     with db() as conn:
-        sync_estimates(client, conn, progress=lambda m: print(f"  · {m}"))
+        sync_for_email(client, conn, progress=lambda m: print(f"  · {m}"))
 
         with conn.cursor() as cur:
             cur.execute(

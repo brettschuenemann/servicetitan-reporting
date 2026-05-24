@@ -26,7 +26,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from lib.ai_summary import build_summary  # noqa: E402
+from lib.database import db  # noqa: E402
 from lib.email_utils import header as fmt_recipients, parse_recipients  # noqa: E402
+from lib.servicetitan import ServiceTitanClient  # noqa: E402
+from lib.sync import sync_for_email  # noqa: E402
 
 REQUIRED = (
     "SMTP_USER", "SMTP_PASSWORD", "EMAIL_TO",
@@ -40,6 +43,14 @@ if missing:
 
 def main() -> int:
     today = date.today()
+    print("Pre-email sync (incremental, all entities)…")
+    client = ServiceTitanClient(
+        app_key=os.environ["ST_APP_KEY"], tenant_id=os.environ["ST_TENANT_ID"],
+        client_id=os.environ["ST_CLIENT_ID"], client_secret=os.environ["ST_CLIENT_SECRET"],
+    )
+    with db() as conn:
+        sync_for_email(client, conn, progress=lambda m: print(f"  · {m}"))
+
     print(f"Building AI summary for {today}…")
     # escape_dollars=False — email clients render markdown without LaTeX munging
     summary_md, brief = build_summary(today, escape_dollars=False, source="weekly_email")

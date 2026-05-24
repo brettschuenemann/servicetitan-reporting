@@ -38,7 +38,7 @@ load_dotenv()
 from lib.database import db  # noqa: E402
 from lib.email_utils import exclude, header as fmt_recipients, parse_recipients  # noqa: E402
 from lib.servicetitan import ServiceTitanClient  # noqa: E402
-from lib.sync import sync_calls  # noqa: E402
+from lib.sync import sync_for_email  # noqa: E402
 
 REQUIRED = (
     "SMTP_USER", "SMTP_PASSWORD",
@@ -614,12 +614,9 @@ def main() -> int:
         client_id=os.environ["ST_CLIENT_ID"], client_secret=os.environ["ST_CLIENT_SECRET"],
     )
 
-    print("Syncing latest calls so missed-call section reflects last 24h…")
+    print("Pre-email sync (incremental, all entities)…")
     with db() as conn:
-        try:
-            sync_calls(client, conn, progress=lambda m: print(f"  · {m}"))
-        except Exception as exc:
-            print(f"  · sync_calls failed (non-fatal): {exc}")
+        sync_for_email(client, conn, progress=lambda m: print(f"  · {m}"))
 
         print("Loading recommendation history + outreach signals…")
         state = load_recommendation_state(conn)

@@ -33,8 +33,13 @@ load_dotenv()
 
 from lib.database import db  # noqa: E402
 from lib.email_utils import header as fmt_recipients, parse_recipients  # noqa: E402
+from lib.servicetitan import ServiceTitanClient  # noqa: E402
+from lib.sync import sync_for_email  # noqa: E402
 
-REQUIRED = ("SMTP_USER", "SMTP_PASSWORD", "EMAIL_TO", "DATABASE_URL")
+REQUIRED = (
+    "SMTP_USER", "SMTP_PASSWORD", "EMAIL_TO", "DATABASE_URL",
+    "ST_APP_KEY", "ST_TENANT_ID", "ST_CLIENT_ID", "ST_CLIENT_SECRET",
+)
 missing = [k for k in REQUIRED if not os.environ.get(k)]
 if missing:
     sys.exit(f"Missing env vars: {', '.join(missing)}")
@@ -474,7 +479,14 @@ def render_backlog(backlog: list[dict]) -> str:
 # ---------- main ----------
 
 def main() -> int:
+    print("Pre-email sync (incremental, all entities)…")
+    client = ServiceTitanClient(
+        app_key=os.environ["ST_APP_KEY"], tenant_id=os.environ["ST_TENANT_ID"],
+        client_id=os.environ["ST_CLIENT_ID"], client_secret=os.environ["ST_CLIENT_SECRET"],
+    )
     with db() as conn:
+        sync_for_email(client, conn, progress=lambda m: print(f"  · {m}"))
+
         state = load_today_state(conn)
         trend = load_7day_trend(conn)
         backlog = load_untouched_backlog(conn)
