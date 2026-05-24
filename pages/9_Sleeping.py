@@ -102,16 +102,16 @@ def find_sleepers(
                 COUNT(*) FILTER (
                   WHERE invoice_date BETWEEN %s AND %s
                 ) AS loyal_invoices,
-                COALESCE(SUM(total) FILTER (
+                COUNT(*) FILTER (
                   WHERE invoice_date BETWEEN %s AND %s
-                ), 0) AS quiet_revenue,
+                ) AS quiet_invoices,
                 MAX(invoice_date) AS last_invoice
               FROM invoices
               WHERE customer_id IS NOT NULL AND customer_name IS NOT NULL
               GROUP BY customer_id
             )
             SELECT * FROM stats
-            WHERE loyal_revenue >= %s AND quiet_revenue = 0
+            WHERE loyal_revenue >= %s AND quiet_invoices = 0
             ORDER BY loyal_revenue DESC
             """,
             (loyal_start, loyal_end, loyal_start, loyal_end,
