@@ -1,0 +1,55 @@
+name: Clear CSR recommendation cooldown
+
+# Manual-only workflow. Use when test runs of the morning CSR email have
+# polluted the csr_recommendations table and you want a fresh suppression
+# slate before tomorrow's real send.
+on:
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: 'Delete rows with sent_at within the last N hours (default 24).'
+        required: false
+        default: '24'
+        type: string
+      dry_run:
+        description: 'Preview only — show what would be deleted, do not actually delete.'
+        required: false
+        default: false
+        type: boolean
+      clear_all:
+        description: 'Nuclear option: delete ALL csr_recommendations rows (ignores hours).'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Clear recommendations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          ARGS="--hours ${{ inputs.hours }}"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ "${{ inputs.clear_all }}" = "true" ]; then
+            ARGS="--all"
+            if [ "${{ inputs.dry_run }}" = "true" ]; then
+              ARGS="$ARGS --dry-run"
+            fi
+          fi
+          echo "Running: python scripts/clear_csr_recommendations.py $ARGS"
+          python scripts/clear_csr_recommendations.py $ARGS
