@@ -383,7 +383,7 @@ SUPPRESS_DAYS_SHORT = {  # used when only voicemails/no-answers detected
 
 # Hard caps per section so a backlog doesn't produce a 100-row email.
 SECTION_CAPS = {
-    "missed":     25,
+    "missed":     10,
     "membership": 25,
     "sleeping":   15,
 }
