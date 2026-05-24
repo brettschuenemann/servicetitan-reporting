@@ -62,11 +62,18 @@ def status_color(val) -> str:
 
 
 def style_status_columns(df: pd.DataFrame, columns: list[str]):
-    """Apply status colors to one or more columns. Returns a Styler object."""
+    """Apply status colors to one or more columns. Returns a Styler object.
+
+    Uses Styler.map when available (pandas ≥ 2.1) and falls back to the
+    older Styler.applymap so we work on whatever pandas Streamlit Cloud
+    happens to install.
+    """
     existing = [c for c in columns if c in df.columns]
     if not existing:
         return df
-    return df.style.map(status_color, subset=existing)
+    styler = df.style
+    fn = getattr(styler, "map", None) or styler.applymap
+    return fn(status_color, subset=existing)
 
 
 # ---------- Branded CSS (mobile + desktop polish) ----------
