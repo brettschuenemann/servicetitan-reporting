@@ -2,10 +2,10 @@ name: Daily CSR call list (Fey)
 
 on:
   schedule:
-    # 13:00 UTC = 8:00 AM ET (Standard) / 9:00 AM ET (Daylight).
-    # GitHub doesn't honor DST. 8 AM standard / 9 AM daylight is fine — list
-    # is ready when she sits down most of the year.
-    - cron: '0 13 * * *'
+    # 13:00 UTC weekdays = 8:00 AM ET (Standard) / 9:00 AM ET (Daylight).
+    # Weekdays only — no point sending Fey a call list on Sat/Sun.
+    # GitHub doesn't honor DST.
+    - cron: '0 13 * * 1-5'
   workflow_dispatch:   # allow a manual "Run workflow" from the Actions tab
 
 jobs:
