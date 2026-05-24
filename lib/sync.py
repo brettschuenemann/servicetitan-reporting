@@ -41,6 +41,127 @@ def _date_only(s):
     return s[:10]
 
 
+def _extract_invoice_item_rows(invoice_id: int, raw: dict) -> list[tuple]:
+    """Flatten an invoice's `items` array into rows for invoice_items.
+
+    ServiceTitan's item payload is inconsistent — `type` can live at the top
+    level or inside `skuType`; `totalCost` may be null and need to be derived
+    from `cost * quantity`. We accept whatever's there and zero-fill the rest.
+    """
+    out: list[tuple] = []
+    for item in (raw.get("items") or []):
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        if not item_id:
+            continue
+        qty = _safe_float(item.get("quantity"))
+        cost = _safe_float(item.get("cost"))
+        total_cost = item.get("totalCost")
+        if total_cost is None:
+            total_cost = cost * qty
+        item_type = item.get("type") or item.get("skuType")
+        if isinstance(item_type, dict):
+            item_type = item_type.get("name")
+        out.append((
+            int(item_id),
+            int(invoice_id),
+            item.get("skuId"),
+            item.get("skuName"),
+            item.get("description"),
+            qty,
+            cost,
+            _safe_float(total_cost),
+            _safe_float(item.get("price")),
+            _safe_float(item.get("total")),
+            item_type,
+            json.dumps(item),
+        ))
+    return out
+
+
+def _write_invoice_items(
+    conn: psycopg2.extensions.connection,
+    invoice_ids: list[int],
+    item_rows: list[tuple],
+) -> None:
+    """Replace all items for the given invoices in one transaction."""
+    if not invoice_ids:
+        return
+    with conn.cursor() as cur:
+        # Delete-and-reinsert is the simplest way to handle items added/removed
+        # from an invoice between syncs. The set is bounded by the invoice batch.
+        cur.execute(
+            "DELETE FROM invoice_items WHERE invoice_id = ANY(%s)",
+            (invoice_ids,),
+        )
+        if item_rows:
+            execute_values(
+                cur,
+                """
+                INSERT INTO invoice_items (
+                    id, invoice_id, sku_id, sku_name, description,
+                    quantity, cost, total_cost, price, total, item_type, raw
+                ) VALUES %s
+                ON CONFLICT (id) DO UPDATE SET
+                    invoice_id=EXCLUDED.invoice_id, sku_id=EXCLUDED.sku_id,
+                    sku_name=EXCLUDED.sku_name, description=EXCLUDED.description,
+                    quantity=EXCLUDED.quantity, cost=EXCLUDED.cost,
+                    total_cost=EXCLUDED.total_cost, price=EXCLUDED.price,
+                    total=EXCLUDED.total, item_type=EXCLUDED.item_type,
+                    raw=EXCLUDED.raw
+                """,
+                item_rows,
+                template="(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                page_size=500,
+            )
+    conn.commit()
+
+
+def backfill_invoice_items_from_raw(
+    conn: psycopg2.extensions.connection,
+    progress: ProgressCallback = _noop,
+    chunk: int = 1000,
+) -> dict:
+    """One-shot: read all invoices.raw and (re)write invoice_items.
+
+    Safe to run anytime — uses delete-then-insert per invoice batch so it's
+    idempotent. Used to bootstrap the items table from invoices already cached
+    before items-sync was wired in.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM invoices")
+        total_invoices = cur.fetchone()["n"]
+    progress(f"Backfilling invoice_items from {total_invoices:,} cached invoices…")
+
+    processed = 0
+    items_written = 0
+    offset = 0
+    while True:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, raw FROM invoices ORDER BY id LIMIT %s OFFSET %s",
+                (chunk, offset),
+            )
+            batch = cur.fetchall()
+        if not batch:
+            break
+        invoice_ids: list[int] = []
+        item_rows: list[tuple] = []
+        for r in batch:
+            invoice_ids.append(int(r["id"]))
+            item_rows.extend(_extract_invoice_item_rows(int(r["id"]), r["raw"]))
+        _write_invoice_items(conn, invoice_ids, item_rows)
+        processed += len(batch)
+        items_written += len(item_rows)
+        offset += chunk
+        progress(f"Backfill: {processed:,}/{total_invoices:,} invoices processed, {items_written:,} items written")
+
+    set_sync_state(conn, "invoice_items", None, items_written)
+    progress(f"Backfill complete. {items_written:,} line items written.")
+    return {"invoices_scanned": processed, "items_written": items_written}
+
+
 def sync_invoices(
     client: ServiceTitanClient,
     conn: psycopg2.extensions.connection,
@@ -116,12 +237,24 @@ def sync_invoices(
                 page_size=500,
             )
         conn.commit()
+
+        # Also (re)write line items for the touched invoices.
+        invoice_ids = [int(inv["id"]) for inv in invoices]
+        item_rows: list[tuple] = []
+        for inv in invoices:
+            item_rows.extend(_extract_invoice_item_rows(int(inv["id"]), inv))
+        _write_invoice_items(conn, invoice_ids, item_rows)
+        progress(f"Invoice items synced: {len(item_rows):,} line items for {len(invoice_ids):,} invoices.")
+
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) AS n FROM invoices")
         total_rows = cur.fetchone()["n"]
+        cur.execute("SELECT COUNT(*) AS n FROM invoice_items")
+        items_total = cur.fetchone()["n"]
     set_sync_state(conn, "invoices", max_modified, total_rows)
+    set_sync_state(conn, "invoice_items", None, items_total)
     progress(f"Invoices synced. {len(invoices)} touched, {total_rows} total in cache.")
-    return {"upserted": len(invoices), "total": total_rows}
+    return {"upserted": len(invoices), "total": total_rows, "items_total": items_total}
 
 
 def sync_memberships(
@@ -608,6 +741,17 @@ def sync_all(
     progress: ProgressCallback = _noop,
 ) -> dict:
     inv_stats = sync_invoices(client, conn, progress)
+
+    # First-time bootstrap: if invoices exist but no items have been written yet,
+    # backfill them from the cached raw payloads. Cheap to check; no-op once done.
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) AS n FROM invoice_items")
+        items_count = cur.fetchone()["n"]
+        cur.execute("SELECT COUNT(*) AS n FROM invoices")
+        invoices_count = cur.fetchone()["n"]
+    if invoices_count and items_count == 0:
+        backfill_invoice_items_from_raw(conn, progress)
+
     mem_stats = sync_memberships(client, conn, progress)
     est_stats = sync_estimates(client, conn, progress)
     job_stats = sync_jobs(client, conn, progress)

@@ -42,6 +42,24 @@ CREATE TABLE IF NOT EXISTS invoices (
 );
 CREATE INDEX IF NOT EXISTS ix_invoices_invoice_date ON invoices(invoice_date);
 CREATE INDEX IF NOT EXISTS ix_invoices_modified_on  ON invoices(modified_on);
+CREATE INDEX IF NOT EXISTS ix_invoices_customer     ON invoices(customer_id);
+
+CREATE TABLE IF NOT EXISTS invoice_items (
+    id            BIGINT PRIMARY KEY,
+    invoice_id    BIGINT NOT NULL,
+    sku_id        BIGINT,
+    sku_name      TEXT,
+    description   TEXT,
+    quantity      DOUBLE PRECISION,
+    cost          DOUBLE PRECISION,
+    total_cost    DOUBLE PRECISION,
+    price         DOUBLE PRECISION,
+    total         DOUBLE PRECISION,
+    item_type     TEXT,
+    raw           JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_invoice_items_invoice ON invoice_items(invoice_id);
+CREATE INDEX IF NOT EXISTS ix_invoice_items_type    ON invoice_items(item_type);
 
 CREATE TABLE IF NOT EXISTS memberships (
     id                    BIGINT PRIMARY KEY,
