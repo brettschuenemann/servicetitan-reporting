@@ -58,13 +58,16 @@ def load_customer_data() -> dict:
         )
         customers = pd.DataFrame([dict(r) for r in cur.fetchall()])
 
-        # New vs returning revenue per month (last 24 months)
+        # New vs returning revenue per month (last 24 months).
+        # invoice_date IS NOT NULL guards against migration artifacts where an
+        # invoice has total > 0 but a null date — those would produce NaN buckets.
         cur.execute(
             """
             WITH firsts AS (
               SELECT customer_id, MIN(invoice_date) AS first_date
               FROM invoices
               WHERE customer_id IS NOT NULL AND total > 0
+                AND invoice_date IS NOT NULL
               GROUP BY customer_id
             )
             SELECT
@@ -79,6 +82,7 @@ def load_customer_data() -> dict:
             FROM invoices i
             JOIN firsts f ON f.customer_id = i.customer_id
             WHERE i.total > 0
+              AND i.invoice_date IS NOT NULL
               AND i.invoice_date >= %s
             GROUP BY 1, 2
             ORDER BY 1
@@ -95,6 +99,7 @@ def load_customer_data() -> dict:
               SELECT customer_id, MIN(invoice_date) AS first_date
               FROM invoices
               WHERE customer_id IS NOT NULL AND total > 0
+                AND invoice_date IS NOT NULL
               GROUP BY customer_id
             )
             SELECT
@@ -106,6 +111,7 @@ def load_customer_data() -> dict:
             FROM invoices i
             JOIN firsts f ON f.customer_id = i.customer_id
             WHERE i.total > 0
+              AND i.invoice_date IS NOT NULL
             GROUP BY 1, 2
             ORDER BY 1, 2
             """
@@ -231,55 +237,71 @@ st.caption(
     "revenue per customer** at 0/3/6/12/24 months since first invoice. Higher "
     "later columns = stickier customers. Blank = not enough time elapsed yet."
 )
-if not cohort_raw.empty:
+if cohort_raw.empty:
+    empty_state("Not enough history for a cohort view yet.")
+else:
+    # Drop any row missing the dimensions we need before casting — guards
+    # against migration-era rows where invoice_date or first_date were null
+    # (would otherwise produce NaN months_since and crash .astype(int)).
+    cohort_raw = cohort_raw.dropna(subset=["cohort_month", "months_since"]).copy()
     cohort_raw["cohort_month"] = pd.to_datetime(cohort_raw["cohort_month"])
-    cohort_raw["revenue"] = cohort_raw["revenue"].astype(float)
-    cohort_raw["months_since"] = cohort_raw["months_since"].astype(int)
-
-    # Cohort size (customers acquired) = customers in months_since=0
-    sizes = (
-        cohort_raw[cohort_raw["months_since"] == 0]
-        .groupby("cohort_month")["customers"]
-        .sum()
+    cohort_raw["revenue"] = pd.to_numeric(cohort_raw["revenue"], errors="coerce").fillna(0.0)
+    cohort_raw["months_since"] = (
+        pd.to_numeric(cohort_raw["months_since"], errors="coerce").fillna(0).astype(int)
+    )
+    cohort_raw["customers"] = (
+        pd.to_numeric(cohort_raw["customers"], errors="coerce").fillna(0).astype(int)
     )
 
-    # Revenue per cohort at each months_since (we want CUMULATIVE)
-    pivot_rev = cohort_raw.pivot_table(
-        index="cohort_month",
-        columns="months_since",
-        values="revenue",
-        aggfunc="sum",
-        fill_value=0,
-    ).sort_index()
-    cumulative = pivot_rev.cumsum(axis=1)
+    if cohort_raw.empty:
+        empty_state("Not enough history for a cohort view yet.")
+    else:
+        # Cohort size (customers acquired) = customers in months_since=0
+        sizes = (
+            cohort_raw[cohort_raw["months_since"] == 0]
+            .groupby("cohort_month")["customers"]
+            .sum()
+        )
 
-    # Convert to revenue-per-customer using the cohort's size
-    per_cust = cumulative.div(sizes, axis=0)
+        # Revenue per cohort at each months_since (we want CUMULATIVE)
+        pivot_rev = cohort_raw.pivot_table(
+            index="cohort_month",
+            columns="months_since",
+            values="revenue",
+            aggfunc="sum",
+            fill_value=0,
+        ).sort_index()
+        cumulative = pivot_rev.cumsum(axis=1)
 
-    # Show the requested bucket columns — others get hidden to keep it readable
-    buckets = [0, 3, 6, 12, 24]
-    available = [b for b in buckets if b in per_cust.columns]
+        # Convert to revenue-per-customer using the cohort's size. Cohorts
+        # missing a size (shouldn't happen post-cleanup, but be safe) get NaN
+        # which we render as "—".
+        per_cust = cumulative.div(sizes, axis=0)
 
-    today_ts = pd.Timestamp(today.replace(day=1))
+        buckets = [0, 3, 6, 12, 24]
+        available = [b for b in buckets if b in per_cust.columns]
+        today_ts = pd.Timestamp(today.replace(day=1))
 
-    def _months_between(a: pd.Timestamp, b: pd.Timestamp) -> int:
-        return (b.year - a.year) * 12 + (b.month - a.month)
+        def _months_between(a: pd.Timestamp, b: pd.Timestamp) -> int:
+            return (b.year - a.year) * 12 + (b.month - a.month)
 
-    rows = []
-    for cohort_month in per_cust.index[::-1][:18]:  # last 18 cohorts, newest first
-        months_elapsed = _months_between(cohort_month, today_ts)
-        row = {"Cohort": cohort_month.strftime("%Y-%m"), "Customers": int(sizes.loc[cohort_month])}
-        for b in available:
-            if b > months_elapsed:
-                row[f"M{b}"] = "—"
-            else:
-                v = per_cust.loc[cohort_month, b]
-                row[f"M{b}"] = f"${v:,.0f}"
-        rows.append(row)
+        rows = []
+        for cohort_month in per_cust.index[::-1][:18]:  # newest 18 cohorts
+            months_elapsed = _months_between(cohort_month, today_ts)
+            size = sizes.get(cohort_month, 0)
+            row = {
+                "Cohort": cohort_month.strftime("%Y-%m"),
+                "Customers": int(size) if pd.notna(size) else 0,
+            }
+            for b in available:
+                if b > months_elapsed:
+                    row[f"M{b}"] = "—"
+                else:
+                    v = per_cust.loc[cohort_month, b] if cohort_month in per_cust.index else None
+                    row[f"M{b}"] = f"${v:,.0f}" if pd.notna(v) else "—"
+            rows.append(row)
 
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-else:
-    empty_state("Not enough history for a cohort view yet.")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 st.divider()
 
