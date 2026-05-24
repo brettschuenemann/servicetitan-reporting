@@ -273,20 +273,74 @@ else:
 
 st.divider()
 
-# ---------- This week's daily revenue (always today + the rest of this week) ----------
-# This section is independent of the sidebar date filter — it always shows the
-# current calendar week so today's number is front-and-center.
+# ---------- This week's daily revenue (current week + scroll back up to 4 weeks) ----------
+# Independent of the sidebar date filter. Navigation buttons shift the view back
+# week-by-week so you can compare against recent history without leaving the home page.
 _today = date.today()
-_week_start = _today - timedelta(days=(_today.weekday() + 1) % 7)  # Sunday
-_week_end = _week_start + timedelta(days=6)                         # Saturday
+_current_week_start = _today - timedelta(days=(_today.weekday() + 1) % 7)  # Sunday
+
+if "week_offset" not in st.session_state:
+    st.session_state["week_offset"] = 0
+
+# Clamp to [-4, 0] in case session state was set elsewhere
+st.session_state["week_offset"] = max(-4, min(0, int(st.session_state["week_offset"])))
+_offset = st.session_state["week_offset"]
+
+_week_start = _current_week_start + timedelta(weeks=_offset)
+_week_end = _week_start + timedelta(days=6)
 _last_week_start = _week_start - timedelta(days=7)
 _last_week_end = _week_end - timedelta(days=7)
+_is_current_week = _offset == 0
 
-st.subheader(f"This week ({_week_start.strftime('%b %d')} – {_week_end.strftime('%b %d, %Y')})")
-st.caption(
-    f"Today is **{_today.strftime('%A, %b %d')}**. "
-    "This view is fixed to the current calendar week; the sidebar filter doesn't affect it."
-)
+
+def _go_prev() -> None:
+    st.session_state["week_offset"] = max(-4, st.session_state["week_offset"] - 1)
+
+
+def _go_next() -> None:
+    st.session_state["week_offset"] = min(0, st.session_state["week_offset"] + 1)
+
+
+_nav_prev, _nav_title, _nav_next = st.columns([1, 4, 1])
+with _nav_prev:
+    st.button(
+        "◀ Prev week",
+        disabled=_offset <= -4,
+        use_container_width=True,
+        key="week_prev",
+        on_click=_go_prev,
+        help="Scroll back one week (up to 4 weeks)",
+    )
+with _nav_next:
+    st.button(
+        "Next week ▶",
+        disabled=_offset >= 0,
+        use_container_width=True,
+        key="week_next",
+        on_click=_go_next,
+        help="Scroll forward toward the current week",
+    )
+with _nav_title:
+    if _is_current_week:
+        _title_label = "This week"
+    elif _offset == -1:
+        _title_label = "Last week"
+    else:
+        _title_label = f"{abs(_offset)} weeks ago"
+    st.subheader(
+        f"{_title_label} ({_week_start.strftime('%b %d')} – {_week_end.strftime('%b %d, %Y')})"
+    )
+
+if _is_current_week:
+    st.caption(
+        f"Today is **{_today.strftime('%A, %b %d')}**. "
+        "Use the buttons to scroll back up to 4 weeks. Independent of the sidebar filter."
+    )
+else:
+    st.caption(
+        f"Showing **{_week_start.strftime('%a %b %d')} – {_week_end.strftime('%a %b %d, %Y')}**. "
+        "Use the buttons to navigate. Independent of the sidebar filter."
+    )
 
 _week_invoices = invoices_to_dataframe(load_invoices(_week_start, _week_end))
 _last_week_invoices = invoices_to_dataframe(load_invoices(_last_week_start, _last_week_end))
@@ -317,21 +371,6 @@ else:
         0.0, index=pd.date_range(start=_last_week_start, end=_last_week_end, freq="D")
     )
 
-# Stats
-_today_ts = pd.Timestamp(_today)
-today_rev = float(_week_daily.loc[_today_ts]) if _today_ts in _week_daily.index else 0.0
-wtd = float(_week_daily.loc[:_today_ts].sum())
-# Match-up "same WTD" last week: through the same DOW position
-_match_through = _last_week_start + timedelta(days=(_today - _week_start).days)
-last_week_wtd = float(_last_week_daily.loc[: pd.Timestamp(_match_through)].sum())
-last_week_full = float(_last_week_daily.sum())
-
-# Same day last week (for "today vs same day last week")
-_last_same_day = pd.Timestamp(_today - timedelta(days=7))
-last_same_day_rev = (
-    float(_last_week_daily.loc[_last_same_day]) if _last_same_day in _last_week_daily.index else 0.0
-)
-
 
 def _delta(new: float, old: float) -> str | None:
     if not old:
@@ -339,13 +378,43 @@ def _delta(new: float, old: float) -> str | None:
     return f"{(new - old) / old * 100:+.1f}% vs ${old:,.0f}"
 
 
-d1, d2, d3, d4 = st.columns(4)
-d1.metric(f"Today ({_today.strftime('%a')})", f"${today_rev:,.0f}", delta=_delta(today_rev, last_same_day_rev))
-d2.metric("Week-to-date", f"${wtd:,.0f}", delta=_delta(wtd, last_week_wtd))
-d3.metric("Last week (same WTD)", f"${last_week_wtd:,.0f}")
-d4.metric("Last week (full)", f"${last_week_full:,.0f}")
+if _is_current_week:
+    # Live-week KPIs: today's number, WTD, last-week match-up, last-week full
+    _today_ts = pd.Timestamp(_today)
+    today_rev = float(_week_daily.loc[_today_ts]) if _today_ts in _week_daily.index else 0.0
+    wtd = float(_week_daily.loc[:_today_ts].sum())
+    _match_through = _last_week_start + timedelta(days=(_today - _week_start).days)
+    last_week_wtd = float(_last_week_daily.loc[: pd.Timestamp(_match_through)].sum())
+    last_week_full = float(_last_week_daily.sum())
+    _last_same_day = pd.Timestamp(_today - timedelta(days=7))
+    last_same_day_rev = (
+        float(_last_week_daily.loc[_last_same_day]) if _last_same_day in _last_week_daily.index else 0.0
+    )
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric(
+        f"Today ({_today.strftime('%a')})",
+        f"${today_rev:,.0f}",
+        delta=_delta(today_rev, last_same_day_rev),
+    )
+    d2.metric("Week-to-date", f"${wtd:,.0f}", delta=_delta(wtd, last_week_wtd))
+    d3.metric("Last week (same WTD)", f"${last_week_wtd:,.0f}")
+    d4.metric("Last week (full)", f"${last_week_full:,.0f}")
+else:
+    # Past-week KPIs: completed week totals + prior-week comparison
+    week_total = float(_week_daily.sum())
+    prior_total = float(_last_week_daily.sum())
+    best_day_amt = float(_week_daily.max()) if len(_week_daily) else 0.0
+    best_day_label = (
+        _week_daily.idxmax().strftime("%a %m/%d") if best_day_amt > 0 else "—"
+    )
+    days_with_revenue = int((_week_daily > 0).sum())
+    d1, d2, d3, d4 = st.columns(4)
+    d1.metric("Week total", f"${week_total:,.0f}", delta=_delta(week_total, prior_total))
+    d2.metric("Prior week total", f"${prior_total:,.0f}")
+    d3.metric("Best day", f"${best_day_amt:,.0f}", help=f"Top revenue day: {best_day_label}")
+    d4.metric("Days with revenue", f"{days_with_revenue}/7")
 
-# Bar chart for the 7 days of this week with today highlighted
+# Bar chart for the 7 days of the selected week (only highlight "today" on the current week)
 _chart_df = pd.DataFrame({"date": _week_days, "total": _week_daily.values})
 _chart_df["day_label"] = _chart_df["date"].dt.strftime("%a %m/%d")
 _chart_df["is_today"] = _chart_df["date"].dt.date == _today
@@ -353,14 +422,14 @@ _chart_df["is_future"] = _chart_df["date"].dt.date > _today
 
 import plotly.graph_objects as go
 
-_colors = [
-    "#1f77b4" if not row.is_today else "#ff7f0e"
-    for row in _chart_df.itertuples()
-]
-# Future days get a lighter shade
-for i, row in enumerate(_chart_df.itertuples()):
-    if row.is_future:
-        _colors[i] = "#cccccc"
+_colors: list[str] = []
+for row in _chart_df.itertuples():
+    if _is_current_week and row.is_today:
+        _colors.append("#ff7f0e")
+    elif _is_current_week and row.is_future:
+        _colors.append("#cccccc")
+    else:
+        _colors.append("#1f77b4")
 
 fig_week = go.Figure(
     go.Bar(
@@ -379,10 +448,15 @@ fig_week.update_layout(
     showlegend=False,
 )
 st.plotly_chart(fig_week, use_container_width=True)
-st.caption(
-    "🟠 today · 🔵 past days · ⚪ days not yet started · "
-    f"Compared with last week ({_last_week_start.strftime('%b %d')} – {_last_week_end.strftime('%b %d')})."
-)
+if _is_current_week:
+    st.caption(
+        "🟠 today · 🔵 past days · ⚪ days not yet started · "
+        f"Compared with last week ({_last_week_start.strftime('%b %d')} – {_last_week_end.strftime('%b %d')})."
+    )
+else:
+    st.caption(
+        f"Compared with the prior week ({_last_week_start.strftime('%b %d')} – {_last_week_end.strftime('%b %d')})."
+    )
 
 st.divider()
 
