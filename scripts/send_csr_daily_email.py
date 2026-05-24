@@ -143,7 +143,12 @@ def lookup_contact(client: ServiceTitanClient, cid: int | None) -> tuple[str, st
 # ---------- data loaders ----------
 
 def load_membership_opps(conn) -> list[dict]:
-    """Install customers in the last 14 days with no active membership."""
+    """Install customers in the last 180 days with no active membership.
+
+    Wide window so leads don't age out of the source before Fey can act —
+    if she doesn't call today, the same customer shows up tomorrow. They
+    only fall off when she calls OR the customer enrolls naturally.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -162,7 +167,7 @@ def load_membership_opps(conn) -> list[dict]:
                   WHERE it.invoice_id = i.id AND it.item_type = 'Equipment'
                 ) AS equipment
               FROM invoices i
-              WHERE i.invoice_date >= CURRENT_DATE - INTERVAL '14 days'
+              WHERE i.invoice_date >= CURRENT_DATE - INTERVAL '180 days'
                 AND i.customer_id IS NOT NULL
                 AND COALESCE(i.sub_total, 0) > 0
                 AND (
@@ -258,7 +263,13 @@ def load_sleeping_customers(conn, limit: int = 15) -> list[dict]:
 
 
 def load_missed_calls(conn) -> list[dict]:
-    """Inbound abandoned + unbooked calls from the last 24 hours."""
+    """Inbound abandoned + unbooked calls from the last 30 days.
+
+    Wide window so unactioned missed calls keep showing daily until
+    Fey responds. Naturally drops calls where the customer subsequently
+    booked a job (new invoice after the missed call) — that means they
+    got handled some other way.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -280,7 +291,16 @@ def load_missed_calls(conn) -> list[dict]:
             LEFT JOIN history h ON h.customer_id = c.customer_id
             WHERE c.direction = 'Inbound'
               AND c.call_type IN ('Abandoned', 'Unbooked')
-              AND c.created_on >= NOW() - INTERVAL '24 hours'
+              AND c.created_on >= NOW() - INTERVAL '30 days'
+              -- Drop calls where the customer booked something after the
+              -- missed call — they've been handled (by Fey, another rep,
+              -- or by calling back themselves).
+              AND NOT EXISTS (
+                SELECT 1 FROM invoices i
+                WHERE i.customer_id = c.customer_id
+                  AND i.total > 0
+                  AND i.invoice_date >= (c.created_on AT TIME ZONE 'UTC')::date
+              )
             ORDER BY c.received_on DESC
             """
         )
@@ -290,9 +310,9 @@ def load_missed_calls(conn) -> list[dict]:
 # ---------- HTML rendering ----------
 
 CARD_STYLES = {
-    "membership": ("#0066EE", "🤝 Membership opportunities", "Recent install customers without a maintenance plan — warmest possible upsell."),
+    "membership": ("#0066EE", "🤝 Membership opportunities", "Install customers in the last 180 days who haven't enrolled. They stay on this list every day until you call them, leave a voicemail, or they enroll."),
     "sleeping":   ("#F2A93B", "💤 Sleeping customers",      "High-value customers who've gone quiet. They already know us; a friendly call wins them back."),
-    "missed":     ("#F34039", "📞 Missed calls — call back today", "Inbound calls in the last 24h that didn't book. These people called US."),
+    "missed":     ("#F34039", "📞 Missed calls — call back", "Inbound calls in the last 30 days that didn't book — and where the customer hasn't booked something since. They stay on this list daily until you call them or they book."),
 }
 
 # Quick call scripts shown at the top of each section. Keep them short —
@@ -343,19 +363,29 @@ def render_call_script(kind: str) -> str:
 </div>
 """
 
-# How long after a recommendation goes out before we'll re-recommend the same
-# customer/call. Two-tier:
-#   "full"  → we have evidence a real conversation happened (long outbound call)
-#   "short" → outbound attempts exist but were voicemail/no-answer; nudge sooner
+# Cooldown windows AFTER Fey has taken some action on a lead.
+#   "full"  → real conversation happened (outbound call ≥ CONVERSATION_DURATION) —
+#             she did her job, give the customer time to think before re-pitching.
+#   "short" → only voicemail/no-answer — try again sooner.
+# Recommendations with NO outreach detected are NEVER time-suppressed; they
+# stay on Fey's list every day until she acts on them or natural drop-off
+# removes them from the source query (booking, enrollment, customer responds).
 SUPPRESS_DAYS_FULL = {
     "membership": 14,
     "sleeping":   45,
-    "missed":     2,
+    "missed":     7,
 }
 SUPPRESS_DAYS_SHORT = {  # used when only voicemails/no-answers detected
     "membership": 4,
     "sleeping":   10,
-    "missed":     1,
+    "missed":     2,
+}
+
+# Hard caps per section so a backlog doesn't produce a 100-row email.
+SECTION_CAPS = {
+    "missed":     25,
+    "membership": 25,
+    "sleeping":   15,
 }
 
 # Duration thresholds (seconds) for inferring call outcome from outbound calls.
@@ -445,11 +475,13 @@ def load_recommendation_state(conn) -> dict:
             if info["attempts"] > 0 or info["called_back_at"]:
                 outreach[cid] = info
 
-    # 3. Decide suppression.
-    #    - called_back: NEVER suppress — hot lead, surface immediately
-    #    - had a real conversation: full window (she did her job)
-    #    - only voicemails / no-answers: SHORT window (nudge to try again)
-    #    - no outreach detected: full window (standard time-based)
+    # 3. Decide suppression. Policy: a recommendation stays on Fey's list
+    #    every day UNTIL she takes action (or the customer responds). We
+    #    only suppress when there's evidence something happened:
+    #      - called_back   → NEVER suppress (hot lead, surface immediately)
+    #      - real conversation (≥ CONVERSATION_DURATION outbound) → full window
+    #      - voicemail / no-answer attempts only → short window
+    #      - NO outreach detected → do NOT suppress (keep showing daily)
     for r in rec_rows:
         kind = r["kind"]
         key = r["dedup_key"]
@@ -464,7 +496,7 @@ def load_recommendation_state(conn) -> dict:
         elif info.get("attempts", 0) > 0:
             window = SUPPRESS_DAYS_SHORT.get(kind)
         else:
-            window = SUPPRESS_DAYS_FULL.get(kind)
+            continue  # no action taken → keep showing daily
 
         if window is None:
             continue
@@ -503,21 +535,26 @@ def record_recommendations(conn, rows: list[tuple]) -> None:
     conn.commit()
 
 
-def html_section(kind: str, rows_html: str, count: int, suppressed_count: int = 0) -> str:
+def html_section(kind: str, rows_html: str, count: int,
+                 suppressed_count: int = 0, more_pending: int = 0) -> str:
     color, title, sub = CARD_STYLES[kind]
     badge = f"<span style='background:{color};color:white;padding:2px 8px;border-radius:10px;font-size:13px;margin-left:8px'>{count}</span>"
-    # Only render the script when there's at least one row to call — saves
-    # the "nothing new today" section from being a wall of unused script.
     script_html = render_call_script(kind) if count > 0 else ""
 
     if rows_html:
         body = rows_html
+        if more_pending > 0:
+            body += (
+                f"<p style='font-size:12px;color:#6b7280;margin-top:10px;font-style:italic'>"
+                f"+ {more_pending} more pending — capped at {SECTION_CAPS[kind]} to keep the email readable. "
+                f"They'll show up here once she clears today's list.</p>"
+            )
     elif suppressed_count > 0:
         body = (
             f"<p style='color:#92400E;margin:6px 0 0;font-size:13px'>"
-            f"All {suppressed_count} potential lead{'s' if suppressed_count != 1 else ''} "
-            f"in this section were on a recent list — Fey's already had a shot at them. "
-            f"They'll come back into rotation when their cooldown expires.</p>"
+            f"All {suppressed_count} pending lead{'s' if suppressed_count != 1 else ''} "
+            f"in this section have already had a call attempt — Fey's done her job. "
+            f"They'll come back into rotation once their cooldown expires.</p>"
         )
     else:
         body = '<p style="color:#888;margin:6px 0 0">Nothing new — focus on the other sections today.</p>'
@@ -642,28 +679,34 @@ def main() -> int:
 
         print("Loading membership opportunities…")
         memberships_all = load_membership_opps(conn)
-        memberships = [
+        memberships_filtered = [
             r for r in memberships_all
             if dedup_key("membership", r.get("customer_id")) not in suppress["membership"]
         ]
-        print(f"  · {len(memberships)} non-member install customers (filtered from {len(memberships_all)})")
+        memberships_total_pending = len(memberships_filtered)
+        memberships = memberships_filtered[:SECTION_CAPS["membership"]]
+        print(f"  · {len(memberships)} shown ({memberships_total_pending} pending; suppressed {len(memberships_all) - memberships_total_pending})")
 
         print("Loading sleeping customers…")
-        # Pull a wider pool so suppression doesn't shrink the visible list.
-        sleeping_all = load_sleeping_customers(conn, limit=40)
-        sleeping = [
+        # Pull a wider pool than the cap so suppression doesn't shrink the visible list.
+        sleeping_all = load_sleeping_customers(conn, limit=SECTION_CAPS["sleeping"] * 4)
+        sleeping_filtered = [
             r for r in sleeping_all
             if dedup_key("sleeping", r.get("customer_id")) not in suppress["sleeping"]
-        ][:15]
-        print(f"  · {len(sleeping)} sleeping customers (filtered from {len(sleeping_all)})")
+        ]
+        sleeping_total_pending = len(sleeping_filtered)
+        sleeping = sleeping_filtered[:SECTION_CAPS["sleeping"]]
+        print(f"  · {len(sleeping)} shown ({sleeping_total_pending} above cap; suppressed {len(suppress['sleeping'])})")
 
         print("Loading missed calls…")
         missed_all = load_missed_calls(conn)
-        missed = [
+        missed_filtered = [
             r for r in missed_all
             if dedup_key("missed", r.get("customer_id"), r.get("id")) not in suppress["missed"]
         ]
-        print(f"  · {len(missed)} missed calls in last 24h (filtered from {len(missed_all)})")
+        missed_total_pending = len(missed_filtered)
+        missed = missed_filtered[:SECTION_CAPS["missed"]]
+        print(f"  · {len(missed)} shown ({missed_total_pending} pending; suppressed {len(missed_all) - missed_total_pending})")
 
     # ---- Enrich with contact info ----
     print("Looking up contact info…")
@@ -780,9 +823,15 @@ def main() -> int:
     <span style="color:#991B1B">📨 Voicemail / 🔕 No answer</span> (try again sooner) ·
     <span style="color:#92400E">🔁 Pending</span> (rec'd before, no outreach detected).
   </p>
-  {html_section('missed',     missed_rows_html, len(missed),     suppressed_count=len(missed_all) - len(missed))}
-  {html_section('membership', mem_rows_html,    len(memberships), suppressed_count=len(memberships_all) - len(memberships))}
-  {html_section('sleeping',   sleep_rows_html,  len(sleeping),    suppressed_count=max(0, len(suppress['sleeping'])))}
+  {html_section('missed',     missed_rows_html, len(missed),
+                suppressed_count=len(missed_all) - missed_total_pending,
+                more_pending=max(0, missed_total_pending - len(missed)))}
+  {html_section('membership', mem_rows_html,    len(memberships),
+                suppressed_count=len(memberships_all) - memberships_total_pending,
+                more_pending=max(0, memberships_total_pending - len(memberships)))}
+  {html_section('sleeping',   sleep_rows_html,  len(sleeping),
+                suppressed_count=len(suppress['sleeping']),
+                more_pending=max(0, sleeping_total_pending - len(sleeping)))}
   <p style="color:#888;font-size:11px;margin-top:24px;text-align:center">
     Generated automatically from ServiceTitan. Questions? Check the dashboard.
   </p>
