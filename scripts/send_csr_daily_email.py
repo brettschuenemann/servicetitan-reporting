@@ -295,6 +295,53 @@ CARD_STYLES = {
     "missed":     ("#F34039", "📞 Missed calls — call back today", "Inbound calls in the last 24h that didn't book. These people called US."),
 }
 
+# Quick call scripts shown at the top of each section. Keep them short —
+# Fey should be able to read them while the phone rings. Edit freely as
+# you tune the pitch; nothing else in the codebase depends on the text.
+CALL_SCRIPTS = {
+    "missed": [
+        ("Opener", "\"Hi [name], this is Fey from Pure Comfort — I'm calling you back, sorry we missed you earlier today.\""),
+        ("Discover", "\"What were you hoping we could help with?\" — let them talk; resist the urge to pitch."),
+        ("Close", "\"Let me get someone out to take a look. What works better for you, morning or afternoon this week?\""),
+        ("If they already booked elsewhere", "\"Totally understand. We're always here if anything comes up — and we usually have same-day availability for emergencies.\""),
+    ],
+    "membership": [
+        ("Opener", "\"Hi [name], this is Fey at Pure Comfort — just checking in on your new system from [install date]. How's it running for you?\""),
+        ("Pivot", "\"The reason I called: most manufacturers require an annual tune-up to keep your warranty valid. A lot of our install customers join our maintenance plan so we handle it automatically — covers two tune-ups a year, priority scheduling, and 10% off any services.\""),
+        ("Special offer", "\"And because you just installed, I can get you 50% off your first year. That makes it a no-brainer — and after that you can keep it or cancel anytime.\""),
+        ("Close", "\"Want me to lock that in today, or text you the details to look over first?\""),
+        ("If \"too expensive\"", "\"At 50% off the first year, it pays for itself the first time anything goes wrong — and it keeps your warranty in force, which is usually the bigger number.\""),
+        ("If \"let me think about it\"", "\"Totally fair. Can I text you the plan details and the first-year discount? That way you've got it whenever you're ready.\""),
+    ],
+    "sleeping": [
+        ("Opener", "\"Hi [name], this is Fey at Pure Comfort. I was going through our records and saw it's been a while — last time we were out we [last service]. Just wanted to check in: how's the system been holding up?\""),
+        ("Listen first", "Don't go straight to a sale. Let them talk about the system, the weather, whatever. The reconnect matters more than the pitch."),
+        ("Soft offer", "\"We're about to head into [cooling/heating] season — most of our regulars are getting a tune-up about now to catch anything before it turns into a breakdown. Want to get on the calendar?\""),
+        ("If \"not right now\"", "\"No problem at all. Mind if I send a text in a couple of months as a reminder? You know where to find us if anything comes up.\""),
+    ],
+}
+
+
+def render_call_script(kind: str) -> str:
+    """Render the per-section call script as a compact list. Returns empty
+    string if no script is defined for this kind."""
+    items = CALL_SCRIPTS.get(kind, [])
+    if not items:
+        return ""
+    rows = "".join(
+        f"<div style='margin-top:6px'>"
+        f"<div style='font-size:11px;font-weight:700;color:#374151;text-transform:uppercase;letter-spacing:0.04em'>{escape(label)}</div>"
+        f"<div style='font-size:13px;color:#1f2937;margin-top:1px;line-height:1.45'>{escape(line)}</div>"
+        f"</div>"
+        for label, line in items
+    )
+    return f"""
+<div style="background:#fff8e1;border:1px solid #fde68a;border-radius:6px;padding:10px 12px;margin-bottom:12px">
+  <div style="font-size:12px;font-weight:700;color:#92400E;text-transform:uppercase;letter-spacing:0.05em">📋 Call script</div>
+  {rows}
+</div>
+"""
+
 # How long after a recommendation goes out before we'll re-recommend the same
 # customer/call. Two-tier:
 #   "full"  → we have evidence a real conversation happened (long outbound call)
@@ -458,10 +505,14 @@ def record_recommendations(conn, rows: list[tuple]) -> None:
 def html_section(kind: str, rows_html: str, count: int) -> str:
     color, title, sub = CARD_STYLES[kind]
     badge = f"<span style='background:{color};color:white;padding:2px 8px;border-radius:10px;font-size:13px;margin-left:8px'>{count}</span>"
+    # Only render the script when there's at least one row to call — saves
+    # the "nothing new today" section from being a wall of unused script.
+    script_html = render_call_script(kind) if count > 0 else ""
     return f"""
 <div style="border:1px solid #e5e7eb;border-left:6px solid {color};border-radius:8px;padding:16px 20px;margin-bottom:24px;background:white">
   <h2 style="margin:0 0 4px 0;color:{color};font-size:18px">{title} {badge}</h2>
   <p style="margin:0 0 12px 0;color:#555;font-size:13px">{sub}</p>
+  {script_html}
   {rows_html or '<p style="color:#888;margin:6px 0 0">Nothing new — focus on the other sections today.</p>'}
 </div>
 """
