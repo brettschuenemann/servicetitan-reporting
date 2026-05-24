@@ -188,7 +188,10 @@ def load_7day_trend(conn) -> list[dict]:
                 ON r.customer_id = c.customer_id
                AND (c.created_on AT TIME ZONE 'America/Chicago')::date = r.day
               WHERE c.direction = 'Outbound'
-              GROUP BY day, r.customer_id
+              -- Full expression in GROUP BY: the alias `day` collides with
+              -- `r.day` from the joined CTE so Postgres can't resolve it.
+              GROUP BY (c.created_on AT TIME ZONE 'America/Chicago')::date,
+                       r.customer_id
             ),
             day_contact AS (
               SELECT
