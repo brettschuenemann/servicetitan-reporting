@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from lib.database import db  # noqa: E402
+from lib.email_utils import header as fmt_recipients, parse_recipients  # noqa: E402
 from lib.servicetitan import ServiceTitanClient  # noqa: E402
 from lib.sync import sync_estimates  # noqa: E402
 
@@ -172,17 +173,21 @@ def main() -> int:
             "</body></html>"
         )
 
+    recipients = parse_recipients(os.environ["EMAIL_TO"])
+    if not recipients:
+        sys.exit("EMAIL_TO has no valid addresses.")
+
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = os.environ.get("EMAIL_FROM") or os.environ["SMTP_USER"]
-    msg["To"] = os.environ["EMAIL_TO"]
+    msg["To"] = fmt_recipients(recipients)
     msg.set_content(text)
     msg.add_alternative(html, subtype="html")
 
-    print(f"Connecting to Gmail SMTP and sending to {os.environ['EMAIL_TO']}…")
+    print(f"Connecting to Gmail SMTP and sending to {fmt_recipients(recipients)}…")
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context()) as smtp:
         smtp.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
-        smtp.send_message(msg)
+        smtp.send_message(msg, to_addrs=recipients)
     print("Sent.")
     return 0
 

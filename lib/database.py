@@ -215,6 +215,22 @@ CREATE TABLE IF NOT EXISTS ai_summaries (
     raw_brief     TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_ai_summaries_generated_at ON ai_summaries(generated_at DESC);
+
+-- Log of every CSR daily-email recommendation, so we can suppress repeats
+-- and show "pending Xd" context on the ones that come back into rotation.
+-- dedup_key: '<kind>:<customer_id>' for memberships/sleeping, '<kind>:call:<call_id>' for missed.
+CREATE TABLE IF NOT EXISTS csr_recommendations (
+    id           BIGSERIAL PRIMARY KEY,
+    sent_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    kind         TEXT NOT NULL,         -- 'membership' | 'sleeping' | 'missed'
+    customer_id  BIGINT,
+    call_id      BIGINT,
+    dedup_key    TEXT NOT NULL,
+    payload      JSONB
+);
+CREATE INDEX IF NOT EXISTS ix_csr_recs_sent_at   ON csr_recommendations(sent_at);
+CREATE INDEX IF NOT EXISTS ix_csr_recs_dedup_key ON csr_recommendations(dedup_key);
+CREATE INDEX IF NOT EXISTS ix_csr_recs_kind_key  ON csr_recommendations(kind, dedup_key);
 """
 
 

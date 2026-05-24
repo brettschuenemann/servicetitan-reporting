@@ -1,0 +1,35 @@
+name: Daily CSR progress report (EOD)
+
+on:
+  schedule:
+    # 22:00 UTC weekdays.
+    #   = 5:00 PM CDT (Mar–Nov, most of the year)
+    #   = 4:00 PM CST (Nov–Mar)
+    # GitHub doesn't honor DST. The "5pm CST" intent maps to 22:00 UTC most
+    # of the year — drifts to 4pm in winter. End-of-business-day either way.
+    - cron: '0 22 * * 1-5'
+  workflow_dispatch:   # manual "Run workflow" for testing
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Send EOD progress report
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+        run: python scripts/send_csr_progress_report.py
