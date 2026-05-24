@@ -18,6 +18,32 @@ from lib.database import db
 from lib.loaders import get_client
 from lib.style import apply_mobile_styles
 
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _lookup_phone(customer_id: int) -> str:
+    """One API call per customer to fetch the best phone number. 24h cache."""
+    try:
+        contacts = get_client().get_customer_contacts(customer_id)
+    except Exception:
+        return ""
+    ranked = sorted(
+        (c for c in contacts
+         if c.get("value") and c.get("type") in ("MobilePhone", "Phone")),
+        key=lambda c: 0 if c["type"] == "MobilePhone" else 1,
+    )
+    return ranked[0]["value"] if ranked else ""
+
+
+def _format_phone(raw: str) -> str:
+    if not raw:
+        return "—"
+    digits = "".join(c for c in raw if c.isdigit())
+    if len(digits) == 10:
+        return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+    if len(digits) == 11 and digits.startswith("1"):
+        return f"({digits[1:4]}) {digits[4:7]}-{digits[7:]}"
+    return raw
+
 st.set_page_config(page_title="Sleeping customers · ServiceTitan Reporting", layout="wide")
 apply_mobile_styles()
 require_password()
@@ -36,18 +62,12 @@ with st.sidebar:
     )
     loyal_months = st.slider(
         "Loyal period (look this many months *before* the quiet period)",
-        min_value=6, max_value=36, value=12, step=3,
+        min_value=6, max_value=36, value=24, step=3,
     )
     min_spend = st.number_input(
         "Min historical spend ($)",
         min_value=0, value=500, step=100,
         help="Customer must have spent at least this much during the loyal period to count as 'sleeping'.",
-    )
-    enrich_phones = st.checkbox(
-        "Look up phone numbers (slower, one API call per customer)",
-        value=False,
-        help="When checked, the page makes one API call per matched customer (~30 sec for 100 customers). "
-             "Skip for fast browsing.",
     )
 
 # Compute the windows
@@ -121,44 +141,18 @@ c4.metric("Largest single loss", f"${top_loss:,.0f}")
 
 st.divider()
 
-# ---- Phone enrichment ----
-if enrich_phones:
-    st.caption(f"Looking up phone numbers for {total} customers…")
-    client = get_client()
-
-    @st.cache_data(ttl=86400, show_spinner=False)
-    def _phone(cid: int) -> str | None:
-        try:
-            contacts = client.get_customer_contacts(cid)
-        except Exception:
-            return None
-        phones = sorted(
-            (c for c in contacts
-             if c.get("value") and c.get("type") in ("MobilePhone", "Phone")),
-            key=lambda c: 0 if c["type"] == "MobilePhone" else 1,
-        )
-        return phones[0]["value"] if phones else None
-
-    def _fmt_phone(p: str | None) -> str:
-        if not p:
-            return "—"
-        digits = "".join(c for c in p if c.isdigit())
-        if len(digits) == 10:
-            return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
-        if len(digits) == 11 and digits.startswith("1"):
-            return f"({digits[1:4]}) {digits[4:7]}-{digits[7:]}"
-        return p
-
-    progress = st.progress(0.0)
-    phones = []
-    for i, cid in enumerate(df["customer_id"].tolist(), 1):
-        phones.append(_phone(int(cid)))
-        if i % 5 == 0 or i == total:
-            progress.progress(i / total)
-    progress.empty()
-    df["phone"] = [_fmt_phone(p) for p in phones]
-else:
-    df["phone"] = "—  (toggle 'Look up phone numbers' in sidebar)"
+# ---- Phone number lookup (cached 24h per customer) ----
+phone_box = st.empty()
+phone_box.caption(f"Looking up phone numbers for {total} customers (cached for 24h, so this is fast on subsequent loads)…")
+progress = st.progress(0.0)
+raw_phones = []
+for i, cid in enumerate(df["customer_id"].tolist(), 1):
+    raw_phones.append(_lookup_phone(int(cid)))
+    if i % 5 == 0 or i == total:
+        progress.progress(i / total)
+progress.empty()
+phone_box.empty()
+df["phone"] = [_format_phone(p) for p in raw_phones]
 
 # ---- Table ----
 display = df.assign(
