@@ -41,11 +41,11 @@ Methodology you must respect:
 
 Required sections (use these markdown headers):
 1. **The Headline** — what's notable about the period
-2. **What's Working** — wins, momentum, concentration
-3. **What's Concerning** — risks, leaks, stale pipeline
+2. **What's Working** — wins, momentum, concentration. If the returning-customer revenue share is rising vs the prior period, call that out — it's healthy retention.
+3. **What's Concerning** — risks, leaks, stale pipeline. If returning-customer share is falling (business leaning more on new acquisition) or the membership attach rate on recent installs is low, flag it here with the dollar amount of missed enrollment.
 4. **PPC Performance** — dedicated section on Pay Per Click using the PPC data provided. Interpret the *funnel* (estimates sent → won/lost/open, jobs paid vs $0, conversion rates). Comment on whether PPC is paying off, getting better/worse, or has a specific bottleneck (e.g. low estimate win rate vs low job conversion are different problems).
 5. **Phone Room** — dedicated section on call performance. Focus on the booking rate on bookable calls (Booked / (Booked + Unbooked + Abandoned)), trends in that rate, and missed revenue from abandoned calls. Don't penalize CSRs for Excused/NotLead. IMPORTANT: Pure Comfort intentionally runs a single-CSR phone room — do NOT flag CSR concentration, single-point-of-failure, key-person risk, bench depth, or "only one CSR handling most calls" as a concern. It is by design, not a finding. Never name a specific CSR as a single point of failure.
-6. **Do This Week** — 2-3 specific actions tied to dollar amounts"""
+6. **Do This Week** — 2-3 specific actions tied to dollar amounts. If non-member install customers exist this period, **one of the actions must be a membership-attach call list with the count and the dollar value** (e.g. "Call the 4 non-member install customers from this week — $X in install revenue; high-conversion outreach"). Don't recommend hiring or staffing additions in this section."""
 
 
 def _gather_metrics(end: date, window_days: int = SUMMARY_DAYS) -> dict:
@@ -202,6 +202,82 @@ def _gather_metrics(end: date, window_days: int = SUMMARY_DAYS) -> dict:
         )
         csr_perf = [dict(r) for r in cur.fetchall()]
 
+        # ---------- Membership attach (recent installs without enrollment) ----------
+        # Install = invoice with BU name containing 'install' OR an Equipment item.
+        # Mirrors the multi-signal detector on pages/7_Memberships.py.
+        cur.execute(
+            """
+            WITH installs AS (
+              SELECT
+                i.id              AS invoice_id,
+                i.customer_id,
+                i.customer_name,
+                i.invoice_date,
+                i.sub_total       AS install_value,
+                i.business_unit_name
+              FROM invoices i
+              WHERE i.invoice_date BETWEEN %s AND %s
+                AND i.customer_id IS NOT NULL
+                AND COALESCE(i.sub_total, 0) > 0
+                AND (
+                  i.business_unit_name ILIKE %s
+                  OR EXISTS (
+                    SELECT 1 FROM invoice_items it
+                    WHERE it.invoice_id = i.id AND it.item_type = 'Equipment'
+                  )
+                )
+            ),
+            active_mem AS (
+              SELECT DISTINCT customer_id
+              FROM memberships
+              WHERE status = 'Active' AND customer_id IS NOT NULL
+            )
+            SELECT
+              COUNT(*) AS install_invoices,
+              COUNT(DISTINCT ins.customer_id) AS install_customers,
+              COUNT(DISTINCT ins.customer_id) FILTER (
+                WHERE am.customer_id IS NULL
+              ) AS non_member_customers,
+              COALESCE(SUM(ins.install_value), 0) AS install_revenue,
+              COALESCE(SUM(ins.install_value) FILTER (
+                WHERE am.customer_id IS NULL
+              ), 0) AS non_member_revenue
+            FROM installs ins
+            LEFT JOIN active_mem am ON am.customer_id = ins.customer_id
+            """,
+            (start, end, "%install%"),
+        )
+        membership_attach = dict(cur.fetchone())
+
+        # ---------- Customer retention (new vs returning) ----------
+        # New = customer's first-ever invoice falls in the window.
+        # Returning = customer was already in the book before the window.
+        def _new_vs_returning(s, e):
+            cur.execute(
+                """
+                WITH firsts AS (
+                  SELECT customer_id, MIN(invoice_date) AS first_date
+                  FROM invoices
+                  WHERE customer_id IS NOT NULL AND total > 0
+                    AND invoice_date IS NOT NULL
+                  GROUP BY customer_id
+                )
+                SELECT
+                  CASE WHEN f.first_date >= %s THEN 'new' ELSE 'returning' END AS cohort,
+                  COUNT(DISTINCT i.customer_id) AS customers,
+                  COALESCE(SUM(i.total), 0) AS revenue
+                FROM invoices i
+                JOIN firsts f ON f.customer_id = i.customer_id
+                WHERE i.invoice_date BETWEEN %s AND %s AND i.total > 0
+                GROUP BY 1
+                """,
+                (s, s, e),
+            )
+            return {r["cohort"]: dict(r) for r in cur.fetchall()}
+
+        retention_cur = _new_vs_returning(start, end)
+        retention_prior = _new_vs_returning(prior_start, prior_end)
+
     return {
         "window_days": window_days,
         "start": start,
@@ -222,6 +298,11 @@ def _gather_metrics(end: date, window_days: int = SUMMARY_DAYS) -> dict:
         "ppc_estimates_lifetime": ppc_estimates_lifetime,
         "call_types": call_types,
         "csr_perf": csr_perf,
+        "membership_attach": membership_attach,
+        "retention_cur": retention_cur,
+        "retention_prior": retention_prior,
+        "prior_start": prior_start,
+        "prior_end": prior_end,
     }
 
 
@@ -383,6 +464,58 @@ def _format_user_prompt(m: dict) -> str:
             )
     else:
         lines.append("    - (no agent-assigned calls in window)")
+
+    # ---------- Membership attach ----------
+    ma = m["membership_attach"]
+    inst_cust = int(ma["install_customers"] or 0)
+    non_mem = int(ma["non_member_customers"] or 0)
+    on_mem = inst_cust - non_mem
+    attach_rate = (on_mem / inst_cust * 100) if inst_cust else 0
+    non_mem_rev = float(ma["non_member_revenue"] or 0)
+    inst_rev = float(ma["install_revenue"] or 0)
+
+    lines += [
+        "",
+        "MEMBERSHIP ATTACH (last {} days)".format(n),
+        f"- Install customers (BU contains 'install' OR has Equipment item): {inst_cust}",
+        f"- Already on membership: {on_mem}    Not on membership: {non_mem}",
+        f"- Attach rate: {attach_rate:.0f}%",
+        f"- Install revenue: ${inst_rev:,.0f}   "
+        f"of which non-member revenue (missed enrollment opportunity): ${non_mem_rev:,.0f}",
+    ]
+    if non_mem > 0:
+        lines.append(
+            "  Note: each non-member install is a fresh, warm outreach target — "
+            "customer just spent meaningfully and would naturally consider a "
+            "maintenance plan now."
+        )
+
+    # ---------- Customer mix (new vs returning) ----------
+    rc = m["retention_cur"]
+    rp = m["retention_prior"]
+    cur_new_rev = float((rc.get("new") or {}).get("revenue") or 0)
+    cur_ret_rev = float((rc.get("returning") or {}).get("revenue") or 0)
+    cur_total = cur_new_rev + cur_ret_rev
+    cur_ret_share = (cur_ret_rev / cur_total * 100) if cur_total else 0
+
+    prior_new_rev = float((rp.get("new") or {}).get("revenue") or 0)
+    prior_ret_rev = float((rp.get("returning") or {}).get("revenue") or 0)
+    prior_total = prior_new_rev + prior_ret_rev
+    prior_ret_share = (prior_ret_rev / prior_total * 100) if prior_total else 0
+
+    cur_new_n = int((rc.get("new") or {}).get("customers") or 0)
+    cur_ret_n = int((rc.get("returning") or {}).get("customers") or 0)
+
+    lines += [
+        "",
+        "CUSTOMER MIX (new vs returning, last {} days)".format(n),
+        f"- New customers (first-ever invoice this window): {cur_new_n}, ${cur_new_rev:,.0f} revenue",
+        f"- Returning customers (had bought before):      {cur_ret_n}, ${cur_ret_rev:,.0f} revenue",
+        f"- Returning share of revenue: {cur_ret_share:.0f}%  "
+        f"(prior {n}d: {prior_ret_share:.0f}%)",
+        "  Note: returning share rising = healthy retention; falling = leaning on "
+        "new-customer acquisition which is the most expensive revenue you can earn.",
+    ]
 
     return "\n".join(lines)
 
