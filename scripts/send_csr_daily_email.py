@@ -388,6 +388,61 @@ SECTION_CAPS = {
     "sleeping":   15,
 }
 
+# Base URL for the Streamlit app (used to build outcome-action links in the
+# email). Set STREAMLIT_BASE_URL in the workflow secret; falls back to a
+# placeholder that just hides the action links if unset.
+APP_BASE_URL = (os.environ.get("STREAMLIT_BASE_URL") or "").rstrip("/")
+
+# Action links shown under each row. Each entry is (outcome_key, label, color).
+ACTION_LINKS: dict[str, list[tuple[str, str, str]]] = {
+    "membership": [
+        ("enrolled",     "✅ Enrolled",      "#10B981"),
+        ("declined",     "❌ Declined",      "#EF4444"),
+        ("try_later",    "🔁 Try later",     "#F59E0B"),
+        ("wrong_number", "📵 Wrong #",       "#6B7280"),
+    ],
+    "sleeping": [
+        ("reactivated",  "✅ Reactivated",   "#10B981"),
+        ("declined",     "❌ Declined",      "#EF4444"),
+        ("try_later",    "🔁 Try later",     "#F59E0B"),
+        ("wrong_number", "📵 Wrong #",       "#6B7280"),
+    ],
+    "missed": [
+        ("followed_up",  "✅ Followed up",   "#10B981"),
+        ("voicemail",    "📨 Voicemail",     "#F59E0B"),
+        ("try_later",    "🔁 Try later",     "#F59E0B"),
+        ("wrong_number", "📵 Wrong #",       "#6B7280"),
+    ],
+}
+
+
+def render_action_links(kind: str, customer_id: int | None, call_id: int | None = None) -> str:
+    """Render the per-row action links Fey taps after the call.
+
+    Returns empty string when STREAMLIT_BASE_URL isn't configured —
+    rather than rendering broken links.
+    """
+    if not APP_BASE_URL or not customer_id:
+        return ""
+    actions = ACTION_LINKS.get(kind, [])
+    links = []
+    for outcome_key, label, color in actions:
+        params = [f"cust={customer_id}", f"kind={kind}", f"outcome={outcome_key}"]
+        if kind == "missed" and call_id:
+            params.append(f"call={call_id}")
+        url = f"{APP_BASE_URL}/Outcomes?" + "&".join(params)
+        links.append(
+            f"<a href='{url}' style='display:inline-block;padding:3px 9px;"
+            f"border:1px solid {color};color:{color};text-decoration:none;"
+            f"border-radius:12px;font-size:11px;font-weight:600;"
+            f"margin-right:6px;margin-top:2px'>{label}</a>"
+        )
+    return (
+        f"<div style='margin-top:6px;padding-top:6px;border-top:1px dashed #f3f4f6'>"
+        f"<span style='font-size:11px;color:#9ca3af;margin-right:8px'>After the call:</span>"
+        f"{''.join(links)}</div>"
+    )
+
 # Duration thresholds (seconds) for inferring call outcome from outbound calls.
 CONVERSATION_DURATION = 90   # >= 90s = real conversation
 VOICEMAIL_MIN_DURATION = 15  # >= 15s and < 90s = likely voicemail left
@@ -502,6 +557,28 @@ def load_recommendation_state(conn) -> dict:
             continue
         if (now - r["last_seen"]).days < window:
             suppress.setdefault(kind, set()).add(key)
+
+    # 4. Explicit outcomes Fey logged via the action links beat everything
+    #    above. The most recent non-undone outcome whose expires_at is in
+    #    the future (or NULL = permanent) suppresses that dedup_key.
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH ranked AS (
+              SELECT id, kind, dedup_key, outcome, expires_at,
+                     ROW_NUMBER() OVER (PARTITION BY dedup_key
+                                        ORDER BY recorded_at DESC) AS rn
+              FROM csr_customer_outcomes
+            )
+            SELECT kind, dedup_key, outcome, expires_at
+            FROM ranked
+            WHERE rn = 1
+              AND outcome <> 'undone'
+              AND (expires_at IS NULL OR expires_at > NOW())
+            """
+        )
+        for row in cur.fetchall():
+            suppress.setdefault(row["kind"], set()).add(row["dedup_key"])
 
     return {
         "suppress": suppress,
@@ -620,7 +697,8 @@ def _status_badge(*, pending_days: int | None, outreach_info: dict | None) -> st
 
 def html_customer_row(*, name: str, phone: str, email: str, primary_line: str,
                       history_line: str, pending_days: int | None = None,
-                      outreach_info: dict | None = None) -> str:
+                      outreach_info: dict | None = None,
+                      action_links_html: str = "") -> str:
     phone_disp = fmt_phone(phone)
     phone_html = (
         f"<a href='{escape(tel_href(phone))}' style='color:#0066EE;text-decoration:none;font-weight:600'>{escape(phone_disp)}</a>"
@@ -637,6 +715,7 @@ def html_customer_row(*, name: str, phone: str, email: str, primary_line: str,
   <div style="font-size:14px;margin:2px 0 4px">{phone_html}{email_html}</div>
   <div style="font-size:13px;color:#333">{primary_line}</div>
   <div style="font-size:12px;color:#777;margin-top:2px">{history_line}</div>
+  {action_links_html}
 </div>
 """
 
@@ -738,6 +817,7 @@ def main() -> int:
             phone=r.get("phone") or "",
             email=r.get("email") or "",
             **_row_status(r.get("customer_id"), dedup_key("membership", r.get("customer_id"))),
+            action_links_html=render_action_links("membership", r.get("customer_id")),
             primary_line=(
                 f"<b>{fmt_money(r['install_value'])}</b> install on "
                 f"{r['install_date']:%a %b %d} ({days_ago(r['install_date'])}) "
@@ -760,6 +840,7 @@ def main() -> int:
             phone=r.get("phone") or "",
             email=r.get("email") or "",
             **_row_status(r.get("customer_id"), dedup_key("sleeping", r.get("customer_id"))),
+            action_links_html=render_action_links("sleeping", r.get("customer_id")),
             primary_line=(
                 f"Last visit <b>{days_ago(r['last_visit'])}</b> ({r['last_visit']:%b %d, %Y})"
                 + (f" &middot; <i>{escape(short(r['last_summary'], 80))}</i>" if r.get('last_summary') else "")
@@ -779,6 +860,7 @@ def main() -> int:
             phone=r.get("phone") or "",
             email=r.get("email") or "",
             **_row_status(r.get("customer_id"), dedup_key("missed", r.get("customer_id"), r.get("id"))),
+            action_links_html=render_action_links("missed", r.get("customer_id"), r.get("id")),
             primary_line=(
                 f"<b>{escape(r['call_type'])}</b> at "
                 f"{r['received_on']:%-I:%M %p} on {r['received_on']:%a %b %d}"

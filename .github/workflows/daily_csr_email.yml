@@ -38,4 +38,8 @@ jobs:
           FEY_EMAIL_TO: ${{ secrets.FEY_EMAIL_TO }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          # Used to build the per-row outcome-action links in the email.
+          # Example: https://your-app.streamlit.app
+          # If unset, the action links are hidden (graceful degradation).
+          STREAMLIT_BASE_URL: ${{ secrets.STREAMLIT_BASE_URL }}
         run: python scripts/send_csr_daily_email.py

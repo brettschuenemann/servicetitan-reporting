@@ -231,6 +231,23 @@ CREATE TABLE IF NOT EXISTS csr_recommendations (
 CREATE INDEX IF NOT EXISTS ix_csr_recs_sent_at   ON csr_recommendations(sent_at);
 CREATE INDEX IF NOT EXISTS ix_csr_recs_dedup_key ON csr_recommendations(dedup_key);
 CREATE INDEX IF NOT EXISTS ix_csr_recs_kind_key  ON csr_recommendations(kind, dedup_key);
+
+-- Outcomes Fey logs after a call (or before, if she wants to skip a lead).
+-- INSERT-only — never updated. The active outcome for a dedup_key is the
+-- most recent row whose expires_at is NULL or in the future.
+CREATE TABLE IF NOT EXISTS csr_customer_outcomes (
+    id           BIGSERIAL PRIMARY KEY,
+    recorded_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    kind         TEXT NOT NULL,         -- 'membership' | 'sleeping' | 'missed'
+    customer_id  BIGINT,
+    call_id      BIGINT,
+    dedup_key    TEXT NOT NULL,
+    outcome      TEXT NOT NULL,         -- 'enrolled' | 'declined' | 'try_later' | 'wrong_number' | 'followed_up' | 'voicemail'
+    expires_at   TIMESTAMPTZ,            -- NULL = permanent
+    notes        TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_csr_out_dedup_key ON csr_customer_outcomes(dedup_key);
+CREATE INDEX IF NOT EXISTS ix_csr_out_recorded  ON csr_customer_outcomes(recorded_at DESC);
 """
 
 
