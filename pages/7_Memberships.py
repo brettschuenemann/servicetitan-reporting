@@ -226,75 +226,130 @@ st.divider()
 # ---- Missed membership opportunities (recent installs, no membership) -----
 st.subheader("Missed membership opportunities — recent installs")
 st.caption(
-    "Every install without a membership is a missed enrollment. "
-    "An **install** here is any invoice with at least one `Equipment` line "
-    "item (the cleanest HVAC install signal — service calls rarely include "
-    "equipment). **Non-member** = the customer has no Active membership on "
-    "the books today, so they're still fresh outreach targets."
+    "Every install without a membership is a missed enrollment. **Non-member** "
+    "= the customer has no Active membership on the books today, so they're "
+    "still fresh outreach targets. Use the toggles below to pick which signals "
+    "qualify as an install — combine them with OR."
 )
 
-_filt_col, _spacer = st.columns([1, 4])
-with _filt_col:
+# Configurable install signals. Default: BU name + Equipment item — the two
+# zero-setup signals that work even if one is mistagged.
+c1, c2, c3, c4, c5 = st.columns([1, 1.2, 1.2, 1.6, 1])
+with c1:
     _window_days = st.selectbox(
         "Lookback",
         [30, 60, 90, 180, 365],
-        index=2,  # default 90 days = "last 3 months"
+        index=2,
         format_func=lambda d: f"Last {d} days",
         key="missed_attach_window",
     )
+with c2:
+    _sig_bu = st.checkbox("BU name contains 'install'", value=True, key="sig_bu")
+with c3:
+    _sig_equip = st.checkbox("Has Equipment line item", value=True, key="sig_equip")
+with c4:
+    _sig_threshold_on = st.checkbox("Invoice ≥ $", value=False, key="sig_threshold_on")
+with c5:
+    _threshold = st.number_input(
+        "min $", min_value=500, max_value=20000, value=3000, step=500,
+        label_visibility="collapsed",
+        disabled=not _sig_threshold_on,
+        key="sig_threshold_val",
+    )
+
+if not (_sig_bu or _sig_equip or _sig_threshold_on):
+    st.warning("Pick at least one install signal above.")
+    st.stop()
 
 
 @st.cache_data(ttl=300, show_spinner="Finding recent installs…")
-def load_recent_installs(days: int) -> pd.DataFrame:
-    """Recent installs joined to current membership status per customer."""
+def load_recent_installs(
+    days: int,
+    use_bu: bool,
+    use_equip: bool,
+    use_threshold: bool,
+    threshold: int,
+) -> pd.DataFrame:
+    """Recent installs joined to current membership status. Install criteria
+    is the OR of the enabled signals; we also tag *which* signal matched
+    so you can see why each row landed in the list."""
     cutoff = date.today() - timedelta(days=days)
-    with db() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            WITH installs AS (
-              SELECT
-                i.id                    AS invoice_id,
-                i.customer_id,
-                i.customer_name,
-                i.invoice_date,
-                i.sub_total             AS install_value,
-                i.summary,
-                string_agg(DISTINCT it.description, '; ' ORDER BY it.description)
-                  FILTER (WHERE it.item_type = 'Equipment')
-                                        AS equipment
-              FROM invoices i
-              JOIN invoice_items it ON it.invoice_id = i.id
-              WHERE i.invoice_date >= %s
-                AND i.customer_id IS NOT NULL
-                AND COALESCE(i.sub_total, 0) > 0
-                AND it.item_type = 'Equipment'
-              GROUP BY i.id
-            ),
-            active_mem AS (
-              SELECT DISTINCT customer_id
-              FROM memberships
-              WHERE status = 'Active' AND customer_id IS NOT NULL
-            )
-            SELECT
-              ins.*,
-              (am.customer_id IS NOT NULL) AS is_member
-            FROM installs ins
-            LEFT JOIN active_mem am ON am.customer_id = ins.customer_id
-            ORDER BY ins.invoice_date DESC
-            """,
-            (cutoff,),
+
+    # Build OR clause dynamically — at least one signal is guaranteed enabled
+    # by the caller (UI blocks the all-off case).
+    or_parts: list[str] = []
+    params: list = [cutoff]
+    if use_bu:
+        or_parts.append("i.business_unit_name ILIKE '%%install%%'")
+    if use_equip:
+        or_parts.append("EXISTS (SELECT 1 FROM invoice_items it2 "
+                        "WHERE it2.invoice_id = i.id AND it2.item_type = 'Equipment')")
+    if use_threshold:
+        or_parts.append("COALESCE(i.sub_total, 0) >= %s")
+        params.append(threshold)
+    where_install = " OR ".join(or_parts)
+
+    sql = f"""
+        WITH installs AS (
+          SELECT
+            i.id                            AS invoice_id,
+            i.customer_id,
+            i.customer_name,
+            i.invoice_date,
+            i.sub_total                     AS install_value,
+            i.business_unit_name,
+            i.summary,
+            -- Show equipment description when available (informational)
+            (
+              SELECT string_agg(DISTINCT it3.description, '; ' ORDER BY it3.description)
+              FROM invoice_items it3
+              WHERE it3.invoice_id = i.id AND it3.item_type = 'Equipment'
+            )                               AS equipment,
+            -- Which signal(s) matched, for transparency
+            ARRAY_REMOVE(ARRAY[
+              CASE WHEN i.business_unit_name ILIKE '%%install%%' THEN 'BU' END,
+              CASE WHEN EXISTS (
+                SELECT 1 FROM invoice_items it4
+                WHERE it4.invoice_id = i.id AND it4.item_type = 'Equipment'
+              ) THEN 'Equipment' END,
+              CASE WHEN COALESCE(i.sub_total, 0) >= 3000 THEN '≥$3k' END
+            ], NULL)                        AS signals
+          FROM invoices i
+          WHERE i.invoice_date >= %s
+            AND i.customer_id IS NOT NULL
+            AND COALESCE(i.sub_total, 0) > 0
+            AND ({where_install})
+        ),
+        active_mem AS (
+          SELECT DISTINCT customer_id
+          FROM memberships
+          WHERE status = 'Active' AND customer_id IS NOT NULL
         )
+        SELECT
+          ins.*,
+          (am.customer_id IS NOT NULL) AS is_member
+        FROM installs ins
+        LEFT JOIN active_mem am ON am.customer_id = ins.customer_id
+        ORDER BY ins.invoice_date DESC
+    """
+    with db() as conn, conn.cursor() as cur:
+        cur.execute(sql, tuple(params))
         return pd.DataFrame([dict(r) for r in cur.fetchall()])
 
 
-installs = load_recent_installs(_window_days)
+installs = load_recent_installs(
+    _window_days, _sig_bu, _sig_equip, _sig_threshold_on, int(_threshold)
+)
 
 if installs.empty:
+    enabled = []
+    if _sig_bu:        enabled.append("BU name contains 'install'")
+    if _sig_equip:     enabled.append("has Equipment line item")
+    if _sig_threshold_on: enabled.append(f"invoice ≥ ${_threshold:,}")
     st.info(
-        f"No installs with Equipment line items found in the last {_window_days} days. "
-        "If that surprises you, check the Margin page — it may indicate items aren't "
-        "tagged with `Equipment` in ServiceTitan, or aren't coming through in the "
-        "invoice raw payload."
+        f"No matching installs found in the last {_window_days} days with the "
+        f"enabled signals ({' OR '.join(enabled)}). Try widening the lookback or "
+        "enabling another signal."
     )
 else:
     # Multiple installs per customer collapse to one row for the attach view —
@@ -304,10 +359,12 @@ else:
         .groupby("customer_id", as_index=False)
         .agg(
             customer_name=("customer_name", "first"),
+            business_unit_name=("business_unit_name", "first"),
             most_recent_install=("invoice_date", "max"),
             install_count=("invoice_id", "count"),
             total_install_value=("install_value", "sum"),
             equipment=("equipment", lambda s: "; ".join(sorted({e for x in s if x for e in x.split("; ")}))),
+            signals=("signals", lambda s: ", ".join(sorted({sig for row in s if row for sig in row}))),
             is_member=("is_member", "max"),
         )
     )
@@ -365,23 +422,28 @@ else:
         display = non_members.assign(
             most_recent=lambda d: pd.to_datetime(d["most_recent_install"]).dt.strftime("%Y-%m-%d"),
             value=lambda d: d["total_install_value"].map(lambda v: f"${v:,.0f}"),
+            bu=lambda d: d["business_unit_name"].fillna("—"),
+            sig=lambda d: d["signals"].fillna("—"),
         ).rename(
             columns={
                 "customer_name": "Customer",
                 "most_recent": "Most recent install",
                 "install_count": "# installs",
                 "value": "Install value",
+                "bu": "Business unit",
+                "sig": "Matched on",
                 "equipment": "Equipment",
                 "phone": "Phone",
                 "email": "Email",
             }
         )[["Customer", "Most recent install", "# installs", "Install value",
-           "Equipment", "Phone", "Email"]]
+           "Business unit", "Matched on", "Equipment", "Phone", "Email"]]
         st.dataframe(display, use_container_width=True, hide_index=True, height=500)
 
         csv = non_members[[
-            "customer_id", "customer_name", "most_recent_install", "install_count",
-            "total_install_value", "equipment", "phone", "email",
+            "customer_id", "customer_name", "business_unit_name", "signals",
+            "most_recent_install", "install_count", "total_install_value",
+            "equipment", "phone", "email",
         ]].to_csv(index=False).encode("utf-8")
         st.download_button(
             "Download non-member install list (CSV)",
