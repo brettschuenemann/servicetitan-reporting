@@ -503,18 +503,31 @@ def record_recommendations(conn, rows: list[tuple]) -> None:
     conn.commit()
 
 
-def html_section(kind: str, rows_html: str, count: int) -> str:
+def html_section(kind: str, rows_html: str, count: int, suppressed_count: int = 0) -> str:
     color, title, sub = CARD_STYLES[kind]
     badge = f"<span style='background:{color};color:white;padding:2px 8px;border-radius:10px;font-size:13px;margin-left:8px'>{count}</span>"
     # Only render the script when there's at least one row to call — saves
     # the "nothing new today" section from being a wall of unused script.
     script_html = render_call_script(kind) if count > 0 else ""
+
+    if rows_html:
+        body = rows_html
+    elif suppressed_count > 0:
+        body = (
+            f"<p style='color:#92400E;margin:6px 0 0;font-size:13px'>"
+            f"All {suppressed_count} potential lead{'s' if suppressed_count != 1 else ''} "
+            f"in this section were on a recent list — Fey's already had a shot at them. "
+            f"They'll come back into rotation when their cooldown expires.</p>"
+        )
+    else:
+        body = '<p style="color:#888;margin:6px 0 0">Nothing new — focus on the other sections today.</p>'
+
     return f"""
 <div style="border:1px solid #e5e7eb;border-left:6px solid {color};border-radius:8px;padding:16px 20px;margin-bottom:24px;background:white">
   <h2 style="margin:0 0 4px 0;color:{color};font-size:18px">{title} {badge}</h2>
   <p style="margin:0 0 12px 0;color:#555;font-size:13px">{sub}</p>
   {script_html}
-  {rows_html or '<p style="color:#888;margin:6px 0 0">Nothing new — focus on the other sections today.</p>'}
+  {body}
 </div>
 """
 
@@ -767,9 +780,9 @@ def main() -> int:
     <span style="color:#991B1B">📨 Voicemail / 🔕 No answer</span> (try again sooner) ·
     <span style="color:#92400E">🔁 Pending</span> (rec'd before, no outreach detected).
   </p>
-  {html_section('missed', missed_rows_html, len(missed))}
-  {html_section('membership', mem_rows_html, len(memberships))}
-  {html_section('sleeping', sleep_rows_html, len(sleeping))}
+  {html_section('missed',     missed_rows_html, len(missed),     suppressed_count=len(missed_all) - len(missed))}
+  {html_section('membership', mem_rows_html,    len(memberships), suppressed_count=len(memberships_all) - len(memberships))}
+  {html_section('sleeping',   sleep_rows_html,  len(sleeping),    suppressed_count=max(0, len(suppress['sleeping'])))}
   <p style="color:#888;font-size:11px;margin-top:24px;text-align:center">
     Generated automatically from ServiceTitan. Questions? Check the dashboard.
   </p>
@@ -856,10 +869,17 @@ def main() -> int:
                          json.dumps({"customer_name": r.get("customer_name"),
                                      "call_type": r.get("call_type"),
                                      "received_on": str(r.get("received_on") or "")})))
-    if log_rows:
+    # Skip recording on test runs — otherwise manual workflow_dispatch triggers
+    # "burn" the suppression cushion and make subsequent real emails empty.
+    is_manual_trigger = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+    is_dry_run = os.environ.get("CSR_DRY_RUN", "").lower() in ("1", "true", "yes")
+    if log_rows and not (is_manual_trigger or is_dry_run):
         with db() as conn:
             record_recommendations(conn, log_rows)
         print(f"Logged {len(log_rows)} recommendations to csr_recommendations.")
+    elif log_rows:
+        reason = "manual workflow_dispatch" if is_manual_trigger else "CSR_DRY_RUN env var"
+        print(f"Skipping recommendation log ({reason}) — suppression state unchanged.")
     return 0
 
 
