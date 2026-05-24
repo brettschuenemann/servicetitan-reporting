@@ -64,6 +64,8 @@ def load_today_state(conn) -> dict:
     with conn.cursor() as cur:
         # Today's recommendations (in Chicago time). Group by kind + customer
         # so multi-kind recs for the same customer count once per section.
+        # Note: MIN(jsonb) isn't a valid aggregate in Postgres — array_agg
+        # gives us any one payload (we don't care which for display purposes).
         cur.execute(
             """
             SELECT
@@ -71,7 +73,7 @@ def load_today_state(conn) -> dict:
               customer_id,
               dedup_key,
               MIN(sent_at) AS first_sent_today,
-              MIN(payload) AS payload
+              (ARRAY_AGG(payload ORDER BY sent_at))[1] AS payload
             FROM csr_recommendations
             WHERE (sent_at AT TIME ZONE 'America/Chicago')::date =
                   (NOW()   AT TIME ZONE 'America/Chicago')::date
