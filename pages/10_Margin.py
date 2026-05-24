@@ -76,6 +76,11 @@ def load_margin(s: date, e: date) -> dict:
     with db() as conn, conn.cursor() as cur:
         # Invoice-level margin: subtotal as revenue, sum(item totalCost) as COGS.
         # Exclude Discount lines from COGS so a discount doesn't show as negative cost.
+        # Per-invoice rollup. We separately track:
+        #   - item_count: any non-discount line on the invoice
+        #   - items_with_cost: lines where cost or total_cost is > 0
+        # so we can distinguish "no items in raw" from "items present but cost=0"
+        # (ST data-entry gap — most common cause of phantom 100%-margin invoices).
         cur.execute(
             """
             SELECT
@@ -86,13 +91,17 @@ def load_margin(s: date, e: date) -> dict:
               i.summary,
               i.sub_total                                  AS revenue,
               COALESCE(c.cogs, 0)                          AS cogs,
-              COALESCE(c.item_count, 0)                    AS item_count
+              COALESCE(c.item_count, 0)                    AS item_count,
+              COALESCE(c.items_with_cost, 0)               AS items_with_cost
             FROM invoices i
             LEFT JOIN (
                 SELECT
                   invoice_id,
                   SUM(COALESCE(total_cost, cost*quantity, 0)) AS cogs,
-                  COUNT(*)                                    AS item_count
+                  COUNT(*)                                    AS item_count,
+                  COUNT(*) FILTER (
+                    WHERE COALESCE(total_cost, cost*quantity, 0) > 0
+                  )                                           AS items_with_cost
                 FROM invoice_items
                 WHERE COALESCE(item_type, '') <> 'Discount'
                 GROUP BY invoice_id
@@ -104,14 +113,18 @@ def load_margin(s: date, e: date) -> dict:
         )
         per_invoice = pd.DataFrame([dict(r) for r in cur.fetchall()])
 
-        # Item-type breakdown: revenue, cost, margin per item type
+        # Item-type breakdown — only counts lines with cost > 0 in the cogs
+        # column so missing-cost items don't deflate the per-type margin.
         cur.execute(
             """
             SELECT
               COALESCE(NULLIF(it.item_type, ''), 'Unspecified') AS item_type,
               SUM(COALESCE(it.total, it.price * it.quantity, 0))       AS revenue,
               SUM(COALESCE(it.total_cost, it.cost * it.quantity, 0))   AS cogs,
-              COUNT(*)                                                  AS items
+              COUNT(*)                                                  AS items,
+              COUNT(*) FILTER (
+                WHERE COALESCE(it.total_cost, it.cost * it.quantity, 0) > 0
+              )                                                         AS items_with_cost
             FROM invoice_items it
             JOIN invoices i ON i.id = it.invoice_id
             WHERE i.invoice_date BETWEEN %s AND %s
@@ -122,12 +135,33 @@ def load_margin(s: date, e: date) -> dict:
         )
         by_type = pd.DataFrame([dict(r) for r in cur.fetchall()])
 
-    return {"per_invoice": per_invoice, "by_type": by_type}
+        # Diagnostic: do invoices in this range even have items in their raw
+        # JSONB? If raw->'items' is empty across the board, ServiceTitan's
+        # invoice endpoint isn't returning items inline and we'd need a
+        # separate items fetch.
+        cur.execute(
+            """
+            SELECT
+              COUNT(*) AS total,
+              COUNT(*) FILTER (
+                WHERE raw ? 'items' AND jsonb_typeof(raw->'items') = 'array'
+                  AND jsonb_array_length(raw->'items') > 0
+              ) AS with_items_in_raw
+            FROM invoices
+            WHERE invoice_date BETWEEN %s AND %s
+              AND COALESCE(sub_total, 0) > 0
+            """,
+            (s, e),
+        )
+        raw_diag = dict(cur.fetchone())
+
+    return {"per_invoice": per_invoice, "by_type": by_type, "raw_diag": raw_diag}
 
 
 _data = load_margin(start, end)
 per_inv = _data["per_invoice"]
 by_type = _data["by_type"]
+raw_diag = _data["raw_diag"]
 
 if per_inv.empty:
     empty_state("No invoices in this range.")
@@ -136,23 +170,83 @@ if per_inv.empty:
 # Compute per-invoice margin
 per_inv["gross_profit"] = per_inv["revenue"] - per_inv["cogs"]
 per_inv["margin_pct"] = (per_inv["gross_profit"] / per_inv["revenue"].replace(0, pd.NA)) * 100
-per_inv["has_cost"] = per_inv["item_count"] > 0
 
-# ---- Data quality banner ----
-total_inv = len(per_inv)
-with_cost = int(per_inv["has_cost"].sum())
-without_cost = total_inv - with_cost
-coverage = (with_cost / total_inv * 100) if total_inv else 0
+# Three buckets for diagnostics:
+#   has_cost      → at least one line has a positive cost → real margin number
+#   items_no_cost → items exist but every line has cost = 0 (ST data gap)
+#   no_items      → no items at all in invoice_items (raw didn't have them)
+per_inv["has_cost"]      = per_inv["items_with_cost"] > 0
+per_inv["items_no_cost"] = (per_inv["item_count"] > 0) & (per_inv["items_with_cost"] == 0)
+per_inv["no_items"]      = per_inv["item_count"] == 0
 
-if coverage < 80:
+# ---- Data quality banner + breakdown ----
+total_inv     = len(per_inv)
+with_cost     = int(per_inv["has_cost"].sum())
+items_no_cost = int(per_inv["items_no_cost"].sum())
+no_items      = int(per_inv["no_items"].sum())
+coverage      = (with_cost / total_inv * 100) if total_inv else 0
+raw_total     = int(raw_diag.get("total") or 0)
+raw_with      = int(raw_diag.get("with_items_in_raw") or 0)
+raw_pct       = (raw_with / raw_total * 100) if raw_total else 0
+
+if coverage < 95:
+    rev_no_cost = float(per_inv.loc[~per_inv["has_cost"], "revenue"].sum())
     st.warning(
-        f"⚠️ **Data quality alert:** only **{coverage:.0f}%** of invoices in this "
-        f"range have line-item cost data ({with_cost:,} of {total_inv:,}). Margin "
-        "figures below cover the ones that do — the rest are excluded. Backfilling "
-        "cost in ServiceTitan on items that show 100% margin is a quick win."
+        f"⚠️ **Margin coverage: {coverage:.0f}%** "
+        f"({with_cost:,} of {total_inv:,} invoices have usable cost data). "
+        f"The remaining {total_inv - with_cost:,} invoices "
+        f"(${rev_no_cost:,.0f} revenue) are **excluded** from the margin numbers "
+        "below because counting them as 100% margin would lie to you."
     )
 
-# Restrict margin calcs to invoices with cost data
+with st.expander("📋 Why are some jobs at $0 COGS? (data-quality breakdown)"):
+    st.markdown(
+        f"""
+**Invoices in this date range with subtotal > $0:** **{total_inv:,}**
+
+| Bucket | Count | Share | What it means |
+|---|---:|---:|---|
+| ✅ Has cost data | {with_cost:,} | {coverage:.0f}% | At least one line item has a positive cost; margin is real. |
+| ⚠️ Has items, no cost | {items_no_cost:,} | {(items_no_cost/total_inv*100) if total_inv else 0:.0f}% | Items exist on the invoice but every line has cost = 0 in ServiceTitan. Usually means cost wasn't entered on that SKU/pricebook item. |
+| ❌ No items at all | {no_items:,} | {(no_items/total_inv*100) if total_inv else 0:.0f}% | The invoice has no line items in our cache. Either ServiceTitan didn't return them in the invoice payload, or it's a manual invoice. |
+
+**Raw JSONB check:** {raw_with:,} of {raw_total:,} cached invoices ({raw_pct:.0f}%) have a non-empty `items` array in the raw payload from ServiceTitan.
+"""
+    )
+
+    if no_items > total_inv * 0.3:
+        st.error(
+            "**Likely issue:** ServiceTitan's invoice endpoint isn't returning "
+            "items inline for most of your invoices. We'd need to fetch items "
+            "per-invoice via a separate API call to fill the gap. Let me know and "
+            "I'll add that sync."
+        )
+    elif items_no_cost > total_inv * 0.3:
+        st.info(
+            "**Most likely fix:** the cost field on your pricebook items in "
+            "ServiceTitan isn't populated for many SKUs. Updating cost on "
+            "high-volume items in ST and re-syncing will close the gap — no "
+            "code change needed on my side."
+        )
+
+    # Show a concrete example so the user can verify the diagnosis in ST.
+    if items_no_cost > 0:
+        sample = per_inv[per_inv["items_no_cost"]].nlargest(1, "revenue").iloc[0]
+        st.caption(
+            f"Example of 'items but no cost': invoice **{sample['id']}** for "
+            f"**{sample['customer_name']}** ({sample['invoice_date']}), "
+            f"revenue ${sample['revenue']:,.0f}, items on file: {int(sample['item_count'])}. "
+            "Open this invoice in ServiceTitan and check whether the line-item costs are blank."
+        )
+    if no_items > 0:
+        sample = per_inv[per_inv["no_items"]].nlargest(1, "revenue").iloc[0]
+        st.caption(
+            f"Example of 'no items': invoice **{sample['id']}** for "
+            f"**{sample['customer_name']}** ({sample['invoice_date']}), "
+            f"revenue ${sample['revenue']:,.0f}."
+        )
+
+# Restrict margin calcs to invoices with usable cost data
 costed = per_inv[per_inv["has_cost"]].copy()
 
 # ---- Top KPI row ----
