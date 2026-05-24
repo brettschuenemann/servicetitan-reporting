@@ -10,6 +10,13 @@ customer (per dedup_key, really — so missed calls work per call_id too).
 
 If no params are present (Fey navigated here directly), the page shows
 a recent-outcomes table so she can audit / undo.
+
+⚠️ Auth note: this page intentionally does NOT require a password so Fey
+can tap action links from email on her phone without logging in. Inputs
+are validated against an allow-list (kind + outcome) and the worst-case
+impact of a polluted outcome is one customer disappearing from the list
+for up to 180 days — recoverable by deleting rows from the audit table.
+If you want a stricter posture, add HMAC-signed tokens to the URLs.
 """
 from __future__ import annotations
 
@@ -18,13 +25,11 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import streamlit as st
 
-from lib.auth import require_password
 from lib.database import db
 from lib.style import apply_mobile_styles, empty_state
 
 st.set_page_config(page_title="Outcomes · Pure Comfort", layout="wide")
 apply_mobile_styles()
-require_password()
 
 # ---------- outcome catalog ----------
 
