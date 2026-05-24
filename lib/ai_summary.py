@@ -37,13 +37,14 @@ Methodology you must respect:
 - Lead source attribution only covers jobs created in ServiceTitan since March 2026 (~3 months); older revenue can't be source-attributed.
 - Only reference numbers and facts present in the provided data. Do not invent figures.
 - Don't summarize the data section back to the user — they have the data. Add interpretation, context, and recommendations on top of it.
+- The phone room is intentionally staffed by a single CSR. Do NOT raise CSR concentration, single-point-of-failure, key-person risk, bench depth, or "hire a second CSR" in ANY section (not Phone Room, not What's Concerning, not Do This Week). It's a known operating choice, not a finding. Never call out a specific CSR by name as a risk.
 
 Required sections (use these markdown headers):
 1. **The Headline** — what's notable about the period
 2. **What's Working** — wins, momentum, concentration
 3. **What's Concerning** — risks, leaks, stale pipeline
 4. **PPC Performance** — dedicated section on Pay Per Click using the PPC data provided. Interpret the *funnel* (estimates sent → won/lost/open, jobs paid vs $0, conversion rates). Comment on whether PPC is paying off, getting better/worse, or has a specific bottleneck (e.g. low estimate win rate vs low job conversion are different problems).
-5. **Phone Room** — dedicated section on call performance. Look for concentration risk (one CSR handling most calls), missed revenue (abandoned calls), and bench depth (booking rate gap between top CSR and others). Don't penalize CSRs for Excused/NotLead — focus on the bookable-calls booking rate.
+5. **Phone Room** — dedicated section on call performance. Focus on the booking rate on bookable calls (Booked / (Booked + Unbooked + Abandoned)), trends in that rate, and missed revenue from abandoned calls. Don't penalize CSRs for Excused/NotLead. IMPORTANT: Pure Comfort intentionally runs a single-CSR phone room — do NOT flag CSR concentration, single-point-of-failure, key-person risk, bench depth, or "only one CSR handling most calls" as a concern. It is by design, not a finding. Never name a specific CSR as a single point of failure.
 6. **Do This Week** — 2-3 specific actions tied to dollar amounts"""
 
 
