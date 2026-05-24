@@ -15,7 +15,36 @@ import streamlit as st
 
 from lib.auth import require_password
 from lib.database import db
+from lib.loaders import get_client
 from lib.style import apply_mobile_styles, chart_height
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _lookup_contact(customer_id: int) -> tuple[str, str]:
+    """One API call per customer; returns (best_phone, best_email). 24h cache."""
+    try:
+        contacts = get_client().get_customer_contacts(customer_id)
+    except Exception:
+        return "", ""
+    phones = sorted(
+        (c for c in contacts
+         if c.get("value") and c.get("type") in ("MobilePhone", "Phone")),
+        key=lambda c: 0 if c["type"] == "MobilePhone" else 1,
+    )
+    emails = [c["value"] for c in contacts
+              if c.get("value") and c.get("type") == "Email"]
+    return (phones[0]["value"] if phones else ""), (emails[0] if emails else "")
+
+
+def _format_phone(raw: str) -> str:
+    if not raw:
+        return "—"
+    digits = "".join(c for c in raw if c.isdigit())
+    if len(digits) == 10:
+        return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}"
+    if len(digits) == 11 and digits.startswith("1"):
+        return f"({digits[1:4]}) {digits[4:7]}-{digits[7:]}"
+    return raw
 
 st.set_page_config(page_title="Memberships · ServiceTitan Reporting", layout="wide")
 apply_mobile_styles()
@@ -191,3 +220,172 @@ else:
     csv = upcoming[["id", "customer", "to_date", "days_until_end", "billing_amount",
                     "billing_frequency", "customer_id"]].to_csv(index=False).encode("utf-8")
     st.download_button("Download CSV", csv, file_name="upcoming_expirations.csv", mime="text/csv")
+
+st.divider()
+
+# ---- Missed membership opportunities (recent installs, no membership) -----
+st.subheader("Missed membership opportunities — recent installs")
+st.caption(
+    "Every install without a membership is a missed enrollment. "
+    "An **install** here is any invoice with at least one `Equipment` line "
+    "item (the cleanest HVAC install signal — service calls rarely include "
+    "equipment). **Non-member** = the customer has no Active membership on "
+    "the books today, so they're still fresh outreach targets."
+)
+
+_filt_col, _spacer = st.columns([1, 4])
+with _filt_col:
+    _window_days = st.selectbox(
+        "Lookback",
+        [30, 60, 90, 180, 365],
+        index=2,  # default 90 days = "last 3 months"
+        format_func=lambda d: f"Last {d} days",
+        key="missed_attach_window",
+    )
+
+
+@st.cache_data(ttl=300, show_spinner="Finding recent installs…")
+def load_recent_installs(days: int) -> pd.DataFrame:
+    """Recent installs joined to current membership status per customer."""
+    cutoff = date.today() - timedelta(days=days)
+    with db() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH installs AS (
+              SELECT
+                i.id                    AS invoice_id,
+                i.customer_id,
+                i.customer_name,
+                i.invoice_date,
+                i.sub_total             AS install_value,
+                i.summary,
+                string_agg(DISTINCT it.description, '; ' ORDER BY it.description)
+                  FILTER (WHERE it.item_type = 'Equipment')
+                                        AS equipment
+              FROM invoices i
+              JOIN invoice_items it ON it.invoice_id = i.id
+              WHERE i.invoice_date >= %s
+                AND i.customer_id IS NOT NULL
+                AND COALESCE(i.sub_total, 0) > 0
+                AND it.item_type = 'Equipment'
+              GROUP BY i.id
+            ),
+            active_mem AS (
+              SELECT DISTINCT customer_id
+              FROM memberships
+              WHERE status = 'Active' AND customer_id IS NOT NULL
+            )
+            SELECT
+              ins.*,
+              (am.customer_id IS NOT NULL) AS is_member
+            FROM installs ins
+            LEFT JOIN active_mem am ON am.customer_id = ins.customer_id
+            ORDER BY ins.invoice_date DESC
+            """,
+            (cutoff,),
+        )
+        return pd.DataFrame([dict(r) for r in cur.fetchall()])
+
+
+installs = load_recent_installs(_window_days)
+
+if installs.empty:
+    st.info(
+        f"No installs with Equipment line items found in the last {_window_days} days. "
+        "If that surprises you, check the Margin page — it may indicate items aren't "
+        "tagged with `Equipment` in ServiceTitan, or aren't coming through in the "
+        "invoice raw payload."
+    )
+else:
+    # Multiple installs per customer collapse to one row for the attach view —
+    # otherwise the same customer's two installs would inflate the denominator.
+    per_customer = (
+        installs.sort_values("invoice_date", ascending=False)
+        .groupby("customer_id", as_index=False)
+        .agg(
+            customer_name=("customer_name", "first"),
+            most_recent_install=("invoice_date", "max"),
+            install_count=("invoice_id", "count"),
+            total_install_value=("install_value", "sum"),
+            equipment=("equipment", lambda s: "; ".join(sorted({e for x in s if x for e in x.split("; ")}))),
+            is_member=("is_member", "max"),
+        )
+    )
+
+    total_customers = len(per_customer)
+    member_customers = int(per_customer["is_member"].sum())
+    non_member_customers = total_customers - member_customers
+    attach_rate = (member_customers / total_customers * 100) if total_customers else 0
+    missed_value = float(
+        per_customer.loc[~per_customer["is_member"], "total_install_value"].sum()
+    )
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric(
+        f"Install customers (last {_window_days}d)",
+        f"{total_customers:,}",
+        help=f"{len(installs):,} install invoices across {total_customers:,} unique customers",
+    )
+    k2.metric(
+        "Already on membership",
+        f"{member_customers:,}",
+        help="Active membership on the books today",
+    )
+    k3.metric(
+        "Not on membership",
+        f"{non_member_customers:,}",
+        help="The outreach target list below",
+    )
+    k4.metric(
+        "Attach rate",
+        f"{attach_rate:.0f}%",
+        help=f"${missed_value:,.0f} of install revenue went to non-members",
+    )
+
+    non_members = per_customer[~per_customer["is_member"]].copy()
+
+    if non_members.empty:
+        st.success("Every recent install customer is already on a membership. 🎉")
+    else:
+        st.markdown(
+            f"**{non_member_customers:,} non-member install customers** "
+            f"(${missed_value:,.0f} in install revenue) — sorted by most recent install first."
+        )
+
+        # Phone + email lookup (cached 24h per customer). Best-effort.
+        with st.spinner("Looking up contact info…"):
+            phones, emails = [], []
+            for cid in non_members["customer_id"]:
+                p, e = _lookup_contact(int(cid))
+                phones.append(p)
+                emails.append(e)
+        non_members["phone"] = [_format_phone(p) for p in phones]
+        non_members["email"] = [e or "—" for e in emails]
+
+        display = non_members.assign(
+            most_recent=lambda d: pd.to_datetime(d["most_recent_install"]).dt.strftime("%Y-%m-%d"),
+            value=lambda d: d["total_install_value"].map(lambda v: f"${v:,.0f}"),
+        ).rename(
+            columns={
+                "customer_name": "Customer",
+                "most_recent": "Most recent install",
+                "install_count": "# installs",
+                "value": "Install value",
+                "equipment": "Equipment",
+                "phone": "Phone",
+                "email": "Email",
+            }
+        )[["Customer", "Most recent install", "# installs", "Install value",
+           "Equipment", "Phone", "Email"]]
+        st.dataframe(display, use_container_width=True, hide_index=True, height=500)
+
+        csv = non_members[[
+            "customer_id", "customer_name", "most_recent_install", "install_count",
+            "total_install_value", "equipment", "phone", "email",
+        ]].to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "Download non-member install list (CSV)",
+            csv,
+            file_name=f"missed_membership_attach_{_window_days}d.csv",
+            mime="text/csv",
+        )
