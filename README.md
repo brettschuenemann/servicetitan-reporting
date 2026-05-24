@@ -101,7 +101,7 @@ A GitHub Actions workflow ([.github/workflows/daily_followups_email.yml](.github
    | `SMTP_USER` | The Gmail address sending the email. |
    | `SMTP_PASSWORD` | The 16-char app password from step 1 (no spaces). |
    | `EMAIL_TO` | Recipient address (your business partner). |
-   | `EMAIL_FROM` *(optional)* | Defaults to `SMTP_USER`. Use a display address like `"Pure Air Reports <reports@pureair.com>"` if you want. |
+   | `EMAIL_FROM` *(optional)* | Defaults to `SMTP_USER`. Use a display address like `"Pure Comfort Reports <reports@pureair.com>"` if you want. |
 
 3. **Test it.** From the Actions tab in GitHub, pick "Daily followups email" → "Run workflow". You should get an email within ~1 minute.
 

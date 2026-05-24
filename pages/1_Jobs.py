@@ -12,7 +12,7 @@ from lib.auth import require_password
 from lib.database import db
 from lib.loaders import load_jobs
 from lib.reporting import jobs_to_dataframe
-from lib.style import apply_mobile_styles, chart_height
+from lib.style import apply_mobile_styles, chart_height, style_status_columns
 
 st.set_page_config(page_title="Jobs · ServiceTitan Reporting", layout="wide")
 apply_mobile_styles()
@@ -104,7 +104,7 @@ table = display[display_cols].rename(
         "summary": "Summary",
     }
 )
-st.dataframe(table, use_container_width=True, hide_index=True)
+st.dataframe(style_status_columns(table, ["Status"]), use_container_width=True, hide_index=True)
 
 csv = filtered.to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, file_name="jobs.csv", mime="text/csv")

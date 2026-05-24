@@ -45,12 +45,12 @@ def main() -> int:
     print(f"Got {len(summary_md)} chars of summary.")
 
     summary_html = md.markdown(summary_md, extensions=["extra"])
-    subject = f"Pure Air weekly summary — {today.strftime('%A, %B %d, %Y')}"
+    subject = f"Pure Comfort weekly summary — {today.strftime('%A, %B %d, %Y')}"
 
     html = f"""<!doctype html>
 <html><body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; color: #111; background: #f6f7f9; margin: 0; padding: 24px;">
   <div style="max-width: 720px; margin: 0 auto; background: #ffffff; border: 1px solid #e3e6ea; border-radius: 8px; padding: 32px;">
-    <div style="font-size: 13px; color: #6b7280; margin-bottom: 4px;">Pure Air · weekly AI summary</div>
+    <div style="font-size: 13px; color: #6b7280; margin-bottom: 4px;">Pure Comfort · weekly AI summary</div>
     <div style="font-size: 16px; color: #111; margin-bottom: 20px; font-weight: 600;">{today.strftime('%A, %B %d, %Y')} · last 14 days</div>
     <hr style="border: none; border-top: 1px solid #e3e6ea; margin: 0 0 20px 0;">
     <div style="font-size: 15px; line-height: 1.55;">

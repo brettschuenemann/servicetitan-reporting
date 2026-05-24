@@ -9,7 +9,7 @@ import streamlit as st
 
 from lib.auth import require_password
 from lib.database import db
-from lib.style import apply_mobile_styles, chart_height
+from lib.style import apply_mobile_styles, chart_height, style_status_columns
 
 st.set_page_config(page_title="Calls · ServiceTitan Reporting", layout="wide")
 apply_mobile_styles()
@@ -204,11 +204,11 @@ else:
         }
     )[["Received", "Phone", "Customer", "Type", "Length", "Agent", "Reason", "Recording"]]
     st.dataframe(
-        missed_display,
+        style_status_columns(missed_display, ["Type"]),
         use_container_width=True,
         hide_index=True,
         column_config={
-            "Recording": st.column_config.LinkColumn("Recording", display_text="🔊 listen"),
+            "Recording": st.column_config.LinkColumn("Recording", display_text="listen"),
         },
         height=400,
     )

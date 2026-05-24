@@ -19,7 +19,7 @@ from .database import db
 
 SUMMARY_DAYS = 14  # rolling window — matches what we showed in chat earlier
 
-_SYSTEM_PROMPT = """You are a senior data analyst writing executive summaries for Pure Air, an HVAC service business in the Chicago area. Your audience is the business owner — they want signal, not numbers they already have on a dashboard.
+_SYSTEM_PROMPT = """You are a senior data analyst writing executive summaries for Pure Comfort, an HVAC service business in the Chicago area. Your audience is the business owner — they want signal, not numbers they already have on a dashboard.
 
 Style:
 - 200-300 words, markdown formatted
@@ -237,7 +237,7 @@ def _format_user_prompt(m: dict) -> str:
     n = m["window_days"]
 
     lines = [
-        f"Generate a {n}-day executive summary for Pure Air, period {m['start']} → {m['end']}.",
+        f"Generate a {n}-day executive summary for Pure Comfort, period {m['start']} → {m['end']}.",
         f"Today is {date.today().strftime('%A, %B %d, %Y')}.",
         "",
         "REVENUE",

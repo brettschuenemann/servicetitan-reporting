@@ -17,7 +17,7 @@ import streamlit as st
 from lib.ai_summary import SUMMARY_DAYS, generate_summary
 from lib.auth import require_password
 from lib.database import db
-from lib.style import apply_mobile_styles, chart_height
+from lib.style import apply_mobile_styles, chart_height, page_header
 from lib.loaders import (
     get_client,
     load_invoices,
@@ -46,14 +46,13 @@ def _months_back(d: date, n: int) -> date:
     return date(y, m, 1)
 
 
-st.set_page_config(page_title="ServiceTitan Reporting", layout="wide")
+st.set_page_config(page_title="Pure Comfort Dashboard", layout="wide")
 apply_mobile_styles()
 require_password()
 
-st.title("ServiceTitan Reporting")
-st.caption(
-    "Revenue is summed from the ServiceTitan invoice ledger by `invoiceDate`. "
-    "Reconciles with the accountant's P&L to within 0.5% over Jan 2024 – Sep 2025."
+page_header(
+    "Pure Comfort dashboard",
+    "Revenue ledger reconciled to the accountant's P&L within 0.5%.",
 )
 
 # ---------- AI summary (top of page, independent of date filter) ----------

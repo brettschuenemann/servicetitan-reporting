@@ -5,10 +5,10 @@ enableXsrfProtection = true
 [browser]
 gatherUsageStats = false
 
-# Pure Air brand palette (pulled from pure-comfort.com stylesheet).
+# Pure Comfort brand palette (pulled from pure-comfort.com stylesheet).
 [theme]
 base = "light"
-primaryColor = "#0066EE"             # Pure Air blue — buttons, sliders, focus rings
+primaryColor = "#0066EE"             # Pure Comfort blue — buttons, sliders, focus rings
 backgroundColor = "#FFFFFF"
 secondaryBackgroundColor = "#F7F7F7" # sidebar + secondary panels
 textColor = "#1A1A1A"
