@@ -20,18 +20,20 @@ from lib.style import apply_mobile_styles
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def _lookup_phone(customer_id: int) -> str:
-    """One API call per customer to fetch the best phone number. 24h cache."""
+def _lookup_contact(customer_id: int) -> tuple[str, str]:
+    """One API call per customer; returns (best_phone, best_email). 24h cache."""
     try:
         contacts = get_client().get_customer_contacts(customer_id)
     except Exception:
-        return ""
-    ranked = sorted(
+        return "", ""
+    phones = sorted(
         (c for c in contacts
          if c.get("value") and c.get("type") in ("MobilePhone", "Phone")),
         key=lambda c: 0 if c["type"] == "MobilePhone" else 1,
     )
-    return ranked[0]["value"] if ranked else ""
+    emails = [c["value"] for c in contacts
+              if c.get("value") and c.get("type") == "Email"]
+    return (phones[0]["value"] if phones else ""), (emails[0] if emails else "")
 
 
 def _format_phone(raw: str) -> str:
@@ -141,18 +143,21 @@ c4.metric("Largest single loss", f"${top_loss:,.0f}")
 
 st.divider()
 
-# ---- Phone number lookup (cached 24h per customer) ----
-phone_box = st.empty()
-phone_box.caption(f"Looking up phone numbers for {total} customers (cached for 24h, so this is fast on subsequent loads)…")
+# ---- Phone + email lookup (cached 24h per customer) ----
+lookup_box = st.empty()
+lookup_box.caption(f"Looking up contact info for {total} customers (cached for 24h, so this is fast on subsequent loads)…")
 progress = st.progress(0.0)
-raw_phones = []
+phones, emails = [], []
 for i, cid in enumerate(df["customer_id"].tolist(), 1):
-    raw_phones.append(_lookup_phone(int(cid)))
+    p, e = _lookup_contact(int(cid))
+    phones.append(p)
+    emails.append(e)
     if i % 5 == 0 or i == total:
         progress.progress(i / total)
 progress.empty()
-phone_box.empty()
-df["phone"] = [_format_phone(p) for p in raw_phones]
+lookup_box.empty()
+df["phone"] = [_format_phone(p) for p in phones]
+df["email"] = [e or "—" for e in emails]
 
 # ---- Table ----
 display = df.assign(
@@ -162,27 +167,27 @@ display = df.assign(
     columns={
         "customer": "Customer",
         "phone": "Phone",
+        "email": "Email",
         "revenue": "Loyal-period spend",
         "loyal_invoices": "Invoices in loyal period",
         "last": "Last invoice",
         "days_quiet": "Days quiet",
-        "customer_id": "Customer ID",
     }
 )[
     [
         "Customer",
         "Phone",
+        "Email",
         "Loyal-period spend",
         "Invoices in loyal period",
         "Last invoice",
         "Days quiet",
-        "Customer ID",
     ]
 ]
 st.dataframe(display, use_container_width=True, hide_index=True, height=500)
 
 csv = df[
-    ["customer_id", "customer", "phone", "loyal_revenue", "loyal_invoices",
-     "last_invoice", "days_quiet"]
+    ["customer_id", "customer", "phone", "email", "loyal_revenue",
+     "loyal_invoices", "last_invoice", "days_quiet"]
 ].to_csv(index=False).encode("utf-8")
 st.download_button("Download CSV", csv, file_name="sleeping_customers.csv", mime="text/csv")
