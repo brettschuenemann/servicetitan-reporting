@@ -248,6 +248,18 @@ CREATE TABLE IF NOT EXISTS csr_customer_outcomes (
 );
 CREATE INDEX IF NOT EXISTS ix_csr_out_dedup_key ON csr_customer_outcomes(dedup_key);
 CREATE INDEX IF NOT EXISTS ix_csr_out_recorded  ON csr_customer_outcomes(recorded_at DESC);
+
+-- Tracks every successful email send so retry crons can skip when the
+-- primary fire already succeeded. Manual workflow_dispatch runs always
+-- send (no dedup) — they're explicit and the operator knows what they want.
+CREATE TABLE IF NOT EXISTS email_sends (
+    id           BIGSERIAL PRIMARY KEY,
+    sent_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    kind         TEXT NOT NULL,         -- 'followups' | 'weekly_summary' | 'csr_daily' | 'csr_progress'
+    recipients   TEXT,                   -- comma-separated, for audit
+    triggered_by TEXT                    -- 'schedule' | 'workflow_dispatch' | 'cli'
+);
+CREATE INDEX IF NOT EXISTS ix_email_sends_kind_sent ON email_sends(kind, sent_at DESC);
 """
 
 

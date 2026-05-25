@@ -27,7 +27,12 @@ load_dotenv()
 
 from lib.ai_summary import build_summary  # noqa: E402
 from lib.database import db  # noqa: E402
-from lib.email_utils import header as fmt_recipients, parse_recipients  # noqa: E402
+from lib.email_utils import (  # noqa: E402
+    header as fmt_recipients,
+    parse_recipients,
+    record_send,
+    should_skip_for_retry,
+)
 from lib.servicetitan import ServiceTitanClient  # noqa: E402
 from lib.sync import sync_for_email  # noqa: E402
 
@@ -43,6 +48,12 @@ if missing:
 
 def main() -> int:
     today = date.today()
+
+    with db() as conn:
+        if should_skip_for_retry(conn, "weekly_summary", hours=6):
+            print("Weekly summary was already sent in the last 6h — skipping retry.")
+            return 0
+
     print("Pre-email sync (incremental, all entities)…")
     client = ServiceTitanClient(
         app_key=os.environ["ST_APP_KEY"], tenant_id=os.environ["ST_TENANT_ID"],
@@ -91,6 +102,8 @@ def main() -> int:
         smtp.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
         smtp.send_message(msg, to_addrs=recipients)
     print("Sent.")
+    with db() as conn:
+        record_send(conn, "weekly_summary", recipients)
     return 0
 
 

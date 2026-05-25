@@ -36,7 +36,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from lib.database import db  # noqa: E402
-from lib.email_utils import exclude, header as fmt_recipients, parse_recipients  # noqa: E402
+from lib.email_utils import (  # noqa: E402
+    exclude,
+    header as fmt_recipients,
+    parse_recipients,
+    record_send,
+    should_skip_for_retry,
+)
 from lib.servicetitan import ServiceTitanClient  # noqa: E402
 from lib.sync import sync_for_email  # noqa: E402
 
@@ -763,6 +769,11 @@ def main() -> int:
         client_id=os.environ["ST_CLIENT_ID"], client_secret=os.environ["ST_CLIENT_SECRET"],
     )
 
+    with db() as conn:
+        if should_skip_for_retry(conn, "csr_daily", hours=6):
+            print("CSR daily email was already sent in the last 6h — skipping retry.")
+            return 0
+
     print("Pre-email sync (incremental, all entities)…")
     with db() as conn:
         sync_for_email(client, conn, progress=lambda m: print(f"  · {m}"))
@@ -994,6 +1005,8 @@ def main() -> int:
         smtp.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
         smtp.send_message(msg, to_addrs=all_recipients)
     print("Sent.")
+    with db() as conn:
+        record_send(conn, "csr_daily", all_recipients)
 
     # Record today's batch AFTER the email successfully sends, so suppression
     # only kicks in for recommendations that actually reached the inbox.

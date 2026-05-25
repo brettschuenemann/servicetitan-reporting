@@ -2,10 +2,12 @@ name: Daily CSR call list (Fey)
 
 on:
   schedule:
-    # 13:00 UTC weekdays = 8:00 AM ET (Standard) / 9:00 AM ET (Daylight).
-    # Weekdays only — no point sending Fey a call list on Sat/Sun.
-    # GitHub doesn't honor DST.
-    - cron: '0 13 * * 1-5'
+    # Primary + retry 1h later. GitHub's free-tier cron is best-effort and
+    # occasionally skips. The script's idempotency guard skips its work
+    # if a successful send was logged in the last 6h, so the retry is a
+    # no-op when the primary succeeded. Weekdays only.
+    - cron: '0 13 * * 1-5'   # 8 AM ET standard / 9 AM EDT (primary)
+    - cron: '0 14 * * 1-5'   # 9 AM ET standard / 10 AM EDT (retry)
   workflow_dispatch:   # allow a manual "Run workflow" from the Actions tab
 
 jobs:

@@ -27,7 +27,12 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from lib.database import db  # noqa: E402
-from lib.email_utils import header as fmt_recipients, parse_recipients  # noqa: E402
+from lib.email_utils import (  # noqa: E402
+    header as fmt_recipients,
+    parse_recipients,
+    record_send,
+    should_skip_for_retry,
+)
 from lib.servicetitan import ServiceTitanClient  # noqa: E402
 from lib.sync import sync_for_email  # noqa: E402
 
@@ -53,6 +58,13 @@ def _fmt_phone(p: str | None) -> str:
 
 
 def main() -> int:
+    # Retry-cron guard: skip if a scheduled run already succeeded recently.
+    # Manual workflow_dispatch always sends.
+    with db() as conn:
+        if should_skip_for_retry(conn, "followups", hours=6):
+            print("Followups email was already sent in the last 6h — skipping retry.")
+            return 0
+
     client = ServiceTitanClient(
         app_key=os.environ["ST_APP_KEY"], tenant_id=os.environ["ST_TENANT_ID"],
         client_id=os.environ["ST_CLIENT_ID"], client_secret=os.environ["ST_CLIENT_SECRET"],
@@ -189,6 +201,8 @@ def main() -> int:
         smtp.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
         smtp.send_message(msg, to_addrs=recipients)
     print("Sent.")
+    with db() as conn:
+        record_send(conn, "followups", recipients)
     return 0
 
 
