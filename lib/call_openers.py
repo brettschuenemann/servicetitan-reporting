@@ -12,8 +12,110 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 import anthropic
+
+
+# Brand → product types Pure Comfort actually installs. Used to extract a
+# clean "<brand> <product>" phrase from messy install notes so we hand
+# Claude something it'll happily use verbatim instead of hedging to "the
+# new system." Expand as you spot more brands in your own data.
+_BRAND_PATTERNS = [
+    r"AO\s*Smith",
+    r"A\.\s*O\.\s*Smith",
+    r"Bradford\s*White",
+    r"Rheem",
+    r"Rinnai",
+    r"Navien",
+    r"Noritz",
+    r"Trane",
+    r"Carrier",
+    r"Lennox",
+    r"Goodman",
+    r"Amana",
+    r"Daikin",
+    r"Mitsubishi",
+    r"Bryant",
+    r"York",
+    r"American\s*Standard",
+    r"Bosch",
+    r"Heil",
+    r"Coleman",
+    r"Ruud",
+]
+
+_PRODUCT_PATTERNS = [
+    r"water\s*heater",
+    r"tankless",
+    r"heat\s*pump",
+    r"furnace",
+    r"air\s*handler",
+    r"air\s*conditioner",
+    r"condenser",
+    r"AC\s*unit",
+    r"mini[-\s]?split",
+    r"boiler",
+    r"sewer\s*line",
+    r"drain\s*line",
+    r"sump\s*pump",
+    r"sewer\s*pump",
+    r"ejector\s*pump",
+    r"water\s*line",
+    r"gas\s*line",
+    r"toilet",
+    r"vanity",
+    r"shower\s*pan",
+]
+
+
+def _extract_equipment(text: str | None) -> str | None:
+    """Pull a short '<brand> <product>' or '<product>' phrase from messy
+    install notes. Returns None if nothing recognizable is found.
+
+    Conservative on purpose — better to return None and let Claude fall
+    back to a generic opener than to fabricate equipment names.
+    """
+    if not text:
+        return None
+    txt = text.strip()
+    brand_re = "|".join(_BRAND_PATTERNS)
+    product_re = "|".join(_PRODUCT_PATTERNS)
+
+    def _title(s: str) -> str:
+        # Brand names like "AO Smith" / "Bradford White" / "Trane" should
+        # stay in their natural casing. Title-case any all-lowercase tokens
+        # but preserve mixed-case ones (Trane → Trane, ao smith → AO Smith).
+        words = s.split()
+        out = []
+        for w in words:
+            if w == w.lower():
+                # All lowercase — title case it
+                out.append(w.title())
+            else:
+                out.append(w)
+        return " ".join(out)
+
+    # Best match: "<brand> ... <product>" within 60 chars of each other
+    m = re.search(
+        rf"\b({brand_re})\b[\w\s\-/.]{{0,60}}?\b({product_re})\b",
+        txt, flags=re.IGNORECASE,
+    )
+    if m:
+        return _title(f"{m.group(1)} {m.group(2)}").replace("  ", " ")
+
+    # Second best: standalone brand mention
+    m = re.search(rf"\b({brand_re})\b", txt, flags=re.IGNORECASE)
+    if m:
+        return _title(m.group(1))
+
+    # Third best: standalone product type
+    m = re.search(rf"\b({product_re})\b", txt, flags=re.IGNORECASE)
+    if m:
+        # Product types stay lowercase ("water heater", "sewer line")
+        return m.group(1).lower()
+
+    return None
 
 
 # Sonnet is plenty capable for this task and ~5× cheaper than Opus.
@@ -31,13 +133,36 @@ GREETING
 - If the name is a business (contains "LLC", "Inc.", "Company", "Theatre", "Restaurant", etc.) or has no clean first name, open with "Hi there" or "Hey there".
 
 SPECIFICITY (mandatory)
-Reference a CONCRETE detail from the customer's history — not a generic placeholder like "your new equipment" or "your last service."
+Reference a CONCRETE detail from the customer's history — not a generic placeholder like "your new equipment" or "your last service." Read ALL the context fields and pull the most distinctive specific detail.
 
-- Membership customers: name the specific equipment from the `equipment:` field whenever it's recorded. Lift the brand and equipment type out of the description verbatim if helpful ("your new Trane heat pump", "the Carrier furnace and air handler we just put in", "the Mitsubishi mini-split"). Only fall back to "your new system" when the equipment field is empty or genuinely uninformative.
+- Membership customers: Pure Comfort does both HVAC and PLUMBING installs. Many "installs" are water heaters, sewer line replacements, drain work, etc. — not just HVAC. EXTRACT THE SPECIFIC ITEM/SCOPE FROM THE DATA — this is the most important rule. Do not say "the install" or "the work we did" — be concrete.
 
-- Sleeping customers: when `last service notes:` are present, reference the SPECIFIC work done ("the capacitor swap", "spring maintenance on both units", "the inducer motor replacement", "topped off the refrigerant"). Don't just say "your last service" — name the work. Skip this only if notes are missing.
+  Worked examples (input → opener):
 
-- Missed callers: if they're an existing customer (lifetime stats present), warmly mention the existing relationship ("good to hear from you again", "saw you've been with us a few years"). For new callers, reference the specific time you saw their call.
+  Input: install notes: "Service to drain and remove AO Smith cyclone 50 gallon 100k btu unit. To install new AO Smith cyclone unit with same specs..."
+  → "Hi Bob, it's Fey at Pure Comfort — just checking in on the new AO Smith water heater we put in last week. How's it running?"
+
+  Input: install notes: "Service to hand dig approx 2-3 ft down 18 foot section of sewer line in back yard. Replace all original 4" cast iron with new schedule 40 pvc..."
+  → "Hi Jim, it's Fey at Pure Comfort — wanted to check in on the sewer line replacement we did a few days ago. Everything draining properly?"
+
+  Input: equipment: "Trane XR15 3-ton heat pump"
+  → "Hi Sarah, it's Fey at Pure Comfort — how's the new Trane heat pump treating you?"
+
+  Input: install notes: "Bradford white 50 gal NG water heater install with new drain down valve and t-5 expansion tank"
+  → "Hey Colin, it's Fey at Pure Comfort — checking in on the new Bradford White water heater we put in. How's it running?"
+
+  Rules of thumb for extraction:
+  * Brand name + equipment type (AO Smith water heater, Bradford White water heater, Trane heat pump, Carrier furnace, Mitsubishi mini-split)
+  * Scope-of-work phrase (sewer line replacement, drain line repair, water heater swap, AC install)
+  * Lift brand + product type VERBATIM from the notes — even if the notes are technical, the customer will recognize their own equipment
+  * Only fall back to "your new system" when BOTH equipment and install notes are completely empty
+
+- Sleeping customers: SKIP any line-item or summary text that looks like a ServiceTitan migration placeholder ("Imported Default Service", "Imported Default Invoice Item", "Default" anything). That's garbage data — never reference it.
+  * When `last service summary:` is meaningful, reference the specific work done.
+  * When the only available data is migration garbage or empty, lean on the relationship: their visit count, dollar history, and recency ("you've been a great customer for years", "noticed it's been about X months since we were out", "saw you've trusted us with a lot of work over the years").
+  * Make them feel valued without inventing details. The loyal-period stats are real.
+
+- Missed callers: reference the specific time you saw their call. If they're an existing customer (lifetime stats present), warmly mention the existing relationship ("good to hear from you again", "saw you've been with us a few years"). If the `last invoice was about:` field has meaningful text (not migration garbage), you can reference their last interaction.
 
 TONE
 - Friendly human in 2026: contractions ("it's", "wanted to", "how's"), warm but not gushing.
@@ -65,13 +190,25 @@ def _format_customer(c: dict) -> str:
     lines = [f"customer_id={cid} kind={kind} name=\"{name}\""]
 
     if kind == "membership":
-        eq = (c.get("equipment") or "").strip() or "(equipment not recorded)"
+        eq = (c.get("equipment") or "").strip()
+        summary = (c.get("install_summary") or "").strip()
+        # Pre-extract a clean equipment phrase from either source so Claude
+        # gets a label it'll happily use verbatim (otherwise it tends to
+        # hedge to "the new system" rather than pull from free-text notes).
+        extracted = _extract_equipment(eq) or _extract_equipment(summary)
         days = c.get("install_days_ago")
         val = c.get("install_value", 0)
         ltv = c.get("lifetime_revenue", 0)
         visits = c.get("lifetime_invoices", 0)
         first_year = c.get("first_visit_year")
-        lines.append(f"  equipment: {eq[:160]}")
+        if extracted:
+            lines.append(f"  EQUIPMENT (use this exact phrase in the opener): {extracted}")
+        elif eq:
+            lines.append(f"  equipment: {eq[:200]}")
+        elif summary:
+            lines.append(f"  install notes (for context): {summary[:200]}")
+        else:
+            lines.append("  equipment: (not recorded — fall back to 'your new system')")
         if days is not None:
             lines.append(f"  install: {days} days ago, ${val:,.0f}")
         if first_year and visits > 1:
@@ -81,12 +218,18 @@ def _format_customer(c: dict) -> str:
 
     elif kind == "sleeping":
         days = c.get("last_visit_days_ago")
-        summary = (c.get("last_summary") or "").strip() or "(no last-service notes)"
+        summary = (c.get("last_summary") or "").strip()
+        items = (c.get("last_items") or "").strip()
         rev = c.get("loyal_revenue", 0)
         visits = c.get("loyal_invoices", 0)
         if days is not None:
             lines.append(f"  last visit: {days} days ago")
-        lines.append(f"  last service notes: {summary[:160]}")
+        if summary:
+            lines.append(f"  last service summary: {summary[:200]}")
+        if items:
+            lines.append(f"  last service line items: {items[:240]}")
+        if not summary and not items:
+            lines.append("  (no last-service notes recorded)")
         lines.append(f"  loyal-period: ${rev:,.0f} across {visits} visits")
 
     elif kind == "missed":
@@ -95,11 +238,14 @@ def _format_customer(c: dict) -> str:
         ltv = c.get("lifetime_revenue", 0)
         visits = c.get("lifetime_invoices", 0)
         last_visit = c.get("last_visit_days_ago")
+        last_summary = (c.get("last_invoice_summary") or "").strip()
         lines.append(f"  missed call: {call_type} at {when}")
         if visits:
             lines.append(f"  existing customer — ${ltv:,.0f} across {visits} visits")
             if last_visit is not None:
                 lines.append(f"  last visit {last_visit} days ago")
+            if last_summary:
+                lines.append(f"  last invoice was about: {last_summary[:200]}")
         else:
             lines.append("  new caller — no prior history with us")
 

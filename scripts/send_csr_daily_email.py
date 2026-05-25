@@ -167,9 +167,18 @@ def load_membership_opps(conn) -> list[dict]:
                 i.invoice_date,
                 i.sub_total   AS install_value,
                 i.business_unit_name,
+                i.summary     AS install_summary,
+                -- Combine sku_name + description for richer equipment context.
+                -- Many shops put detail in one or the other; concatenating gives
+                -- Claude the most specific text to lift verbatim.
                 (
-                  SELECT string_agg(DISTINCT it.description, '; '
-                                    ORDER BY it.description)
+                  SELECT string_agg(
+                    DISTINCT NULLIF(TRIM(
+                      COALESCE(it.sku_name, '') || ' '
+                      || COALESCE(it.description, '')
+                    ), ''),
+                    '; '
+                  )
                   FROM invoice_items it
                   WHERE it.invoice_id = i.id AND it.item_type = 'Equipment'
                 ) AS equipment
@@ -204,6 +213,8 @@ def load_membership_opps(conn) -> list[dict]:
               SUM(ins.install_value) AS install_value,
               MIN(ins.business_unit_name) AS business_unit_name,
               string_agg(DISTINCT ins.equipment, '; ') AS equipment,
+              string_agg(DISTINCT NULLIF(TRIM(ins.install_summary), ''), ' | ')
+                AS install_summary,
               MIN(h.invoices) AS lifetime_invoices,
               MIN(h.lifetime_revenue) AS lifetime_revenue,
               MIN(h.first_visit) AS first_visit
@@ -247,16 +258,38 @@ def load_sleeping_customers(conn, limit: int = 15) -> list[dict]:
                 AND invoice_date >= CURRENT_DATE - INTERVAL '6 months'
             ),
             recent_summary AS (
-              SELECT DISTINCT ON (customer_id)
-                customer_id, summary, invoice_date
-              FROM invoices
-              WHERE customer_id IS NOT NULL AND total > 0
-              ORDER BY customer_id, invoice_date DESC
+              SELECT DISTINCT ON (i.customer_id)
+                i.customer_id,
+                i.summary,
+                i.invoice_date,
+                i.id AS invoice_id,
+                -- The line items from that last invoice — more specific
+                -- than the summary alone, lets Claude reference exact work.
+                (
+                  SELECT string_agg(
+                    DISTINCT NULLIF(TRIM(
+                      COALESCE(it.sku_name, '') || ' '
+                      || COALESCE(it.description, '')
+                    ), ''),
+                    '; '
+                    ORDER BY NULLIF(TRIM(
+                      COALESCE(it.sku_name, '') || ' '
+                      || COALESCE(it.description, '')
+                    ), '')
+                  )
+                  FROM invoice_items it
+                  WHERE it.invoice_id = i.id
+                    AND COALESCE(it.item_type, '') <> 'Discount'
+                ) AS last_items
+              FROM invoices i
+              WHERE i.customer_id IS NOT NULL AND i.total > 0
+              ORDER BY i.customer_id, i.invoice_date DESC
             )
             SELECT
               l.customer_id, l.customer_name,
               l.loyal_invoices, l.loyal_revenue, l.last_visit,
-              rs.summary AS last_summary
+              rs.summary AS last_summary,
+              rs.last_items
             FROM loyal l
             LEFT JOIN quiet q ON q.customer_id = l.customer_id
             LEFT JOIN recent_summary rs ON rs.customer_id = l.customer_id
@@ -287,15 +320,27 @@ def load_missed_calls(conn) -> list[dict]:
               FROM invoices
               WHERE customer_id IS NOT NULL AND total > 0
               GROUP BY customer_id
+            ),
+            last_invoice AS (
+              -- Most recent paid invoice per customer: gives Claude context
+              -- about what their last interaction with us was about.
+              SELECT DISTINCT ON (customer_id)
+                customer_id, summary AS last_invoice_summary
+              FROM invoices
+              WHERE customer_id IS NOT NULL AND total > 0
+                AND summary IS NOT NULL AND TRIM(summary) <> ''
+              ORDER BY customer_id, invoice_date DESC
             )
             SELECT
               c.id, c.received_on, c.from_phone, c.customer_id, c.customer_name,
               c.call_type, c.reason, c.duration_seconds, c.agent_name,
               h.invoices AS lifetime_invoices,
               h.lifetime_revenue,
-              h.last_visit
+              h.last_visit,
+              li.last_invoice_summary
             FROM calls c
             LEFT JOIN history h ON h.customer_id = c.customer_id
+            LEFT JOIN last_invoice li ON li.customer_id = c.customer_id
             WHERE c.direction = 'Inbound'
               AND c.call_type IN ('Abandoned', 'Unbooked')
               AND c.created_on >= NOW() - INTERVAL '30 days'
@@ -857,6 +902,7 @@ def main() -> int:
             "customer_name":    r.get("customer_name"),
             "kind":             "membership",
             "equipment":        r.get("equipment"),
+            "install_summary":  r.get("install_summary"),
             "install_days_ago": (today_d - install_date).days if install_date else None,
             "install_value":    float(r.get("install_value") or 0),
             "lifetime_revenue": float(r.get("lifetime_revenue") or 0),
@@ -871,6 +917,7 @@ def main() -> int:
             "kind":                "sleeping",
             "last_visit_days_ago": (today_d - last_visit).days if last_visit else None,
             "last_summary":        r.get("last_summary"),
+            "last_items":          r.get("last_items"),
             "loyal_revenue":       float(r.get("loyal_revenue") or 0),
             "loyal_invoices":      int(r.get("loyal_invoices") or 0),
         })
@@ -878,14 +925,15 @@ def main() -> int:
         received = r.get("received_on")
         last_visit = r.get("last_visit")
         opener_customers.append({
-            "customer_id":         r.get("customer_id"),
-            "customer_name":       r.get("customer_name") or "Unknown",
-            "kind":                "missed",
-            "call_type":           r.get("call_type"),
-            "call_when":           received.strftime("%a %I:%M %p") if received else "earlier",
-            "lifetime_revenue":    float(r.get("lifetime_revenue") or 0),
-            "lifetime_invoices":   int(r.get("lifetime_invoices") or 0),
-            "last_visit_days_ago": (today_d - last_visit).days if last_visit else None,
+            "customer_id":           r.get("customer_id"),
+            "customer_name":         r.get("customer_name") or "Unknown",
+            "kind":                  "missed",
+            "call_type":             r.get("call_type"),
+            "call_when":             received.strftime("%a %I:%M %p") if received else "earlier",
+            "lifetime_revenue":      float(r.get("lifetime_revenue") or 0),
+            "lifetime_invoices":     int(r.get("lifetime_invoices") or 0),
+            "last_visit_days_ago":   (today_d - last_visit).days if last_visit else None,
+            "last_invoice_summary":  r.get("last_invoice_summary"),
         })
 
     print(f"Generating personalized openers via Claude for {len([c for c in opener_customers if c.get('customer_id')])} customers…")
