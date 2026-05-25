@@ -1033,17 +1033,19 @@ def main() -> int:
                          json.dumps({"customer_name": r.get("customer_name"),
                                      "call_type": r.get("call_type"),
                                      "received_on": str(r.get("received_on") or "")})))
-    # Skip recording on test runs — otherwise manual workflow_dispatch triggers
-    # "burn" the suppression cushion and make subsequent real emails empty.
-    is_manual_trigger = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+    # Always record in production — cron-job.org now triggers the workflow
+    # via the GitHub API as a workflow_dispatch event, so we can no longer
+    # treat workflow_dispatch as "test only." For local testing without
+    # polluting the suppression log, set CSR_DRY_RUN=1 in the environment.
+    # If real pollution happens, the "Clear CSR recommendation cooldown"
+    # workflow can wipe recent rows in one click.
     is_dry_run = os.environ.get("CSR_DRY_RUN", "").lower() in ("1", "true", "yes")
-    if log_rows and not (is_manual_trigger or is_dry_run):
+    if log_rows and not is_dry_run:
         with db() as conn:
             record_recommendations(conn, log_rows)
         print(f"Logged {len(log_rows)} recommendations to csr_recommendations.")
     elif log_rows:
-        reason = "manual workflow_dispatch" if is_manual_trigger else "CSR_DRY_RUN env var"
-        print(f"Skipping recommendation log ({reason}) — suppression state unchanged.")
+        print("Skipping recommendation log (CSR_DRY_RUN env var) — suppression state unchanged.")
     return 0
 
 
