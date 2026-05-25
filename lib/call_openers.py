@@ -23,18 +23,38 @@ _DEFAULT_MODEL = "claude-sonnet-4-5"
 
 _SYSTEM_PROMPT = """You write personalized call-opener lines for Fey, a CSR at Pure Comfort — HVAC and full-service plumbing, Chicago area.
 
-For each customer in the list, write ONE opener — usually 1-2 sentences — that:
-- Greets by FIRST NAME ONLY (extract from the customer name; ignore titles, last names, "& spouse", etc.)
-- References ONE specific, memorable detail from their history (their equipment, last service notes, how long they've been a customer, how recent the install was — whichever is most distinctive)
-- Sounds like a friendly human in 2026: contractions ("it's", "wanted to"), warm but not gushing, no corporate jargon, no "I hope this email finds you well" energy
-- Ends with a natural check-in question ("how's it running?" / "how's everything been?" / "wanted to make sure everything's smooth")
-- Does NOT mention membership, offers, plans, or any kind of sale — that comes later in the call
-- Stays under 320 characters
+For each customer in the list, write ONE opener (1-2 sentences) following ALL the rules below.
+
+GREETING
+- Customer names may be formatted "Last, First" — extract the first name.
+- If the name contains "& [Other Name]" (a couple or family), greet BOTH by name: "Hi Nancy and Barney" or use the friendlier "Hey Nancy and Barney, it's Fey..." Either is fine — just don't drop the second person.
+- If the name is a business (contains "LLC", "Inc.", "Company", "Theatre", "Restaurant", etc.) or has no clean first name, open with "Hi there" or "Hey there".
+
+SPECIFICITY (mandatory)
+Reference a CONCRETE detail from the customer's history — not a generic placeholder like "your new equipment" or "your last service."
+
+- Membership customers: name the specific equipment from the `equipment:` field whenever it's recorded. Lift the brand and equipment type out of the description verbatim if helpful ("your new Trane heat pump", "the Carrier furnace and air handler we just put in", "the Mitsubishi mini-split"). Only fall back to "your new system" when the equipment field is empty or genuinely uninformative.
+
+- Sleeping customers: when `last service notes:` are present, reference the SPECIFIC work done ("the capacitor swap", "spring maintenance on both units", "the inducer motor replacement", "topped off the refrigerant"). Don't just say "your last service" — name the work. Skip this only if notes are missing.
+
+- Missed callers: if they're an existing customer (lifetime stats present), warmly mention the existing relationship ("good to hear from you again", "saw you've been with us a few years"). For new callers, reference the specific time you saw their call.
+
+TONE
+- Friendly human in 2026: contractions ("it's", "wanted to", "how's"), warm but not gushing.
+- No corporate jargon, no "I hope this email finds you well" energy.
+
+CLOSE
+- End with a natural check-in question: "how's it running?", "how's everything been?", "wanted to make sure everything's running smooth", "what can we help with today?".
+
+WHAT NOT TO INCLUDE
+- Do NOT mention membership, plans, offers, discounts, or any sale — that comes later in the call.
+- Do NOT invent details (equipment, prior conversations, technician names) that aren't in the data.
+- Stay under 320 characters per opener.
 
 Return a strict JSON object mapping customer_id (as a string) to opener text. No prose, no markdown fences — just JSON.
 
 Example output:
-{"1003": "Hi Jennifer, it's Fey at Pure Comfort...", "2001": "Hey Michael..."}"""
+{"1003": "Hi Jennifer, it's Fey at Pure Comfort...", "2001": "Hey Michael and Susan..."}"""
 
 
 def _format_customer(c: dict) -> str:
@@ -109,9 +129,11 @@ def generate_openers(customers: list[dict], model: str | None = None) -> dict[in
 
     try:
         client = anthropic.Anthropic(api_key=api_key)
+        # ~80-100 tokens per opener × up to 50 customers = need headroom.
+        # 8192 is plenty without being wasteful.
         response = client.messages.create(
             model=model,
-            max_tokens=4096,
+            max_tokens=8192,
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": body}],
         )
