@@ -69,6 +69,146 @@ _PRODUCT_PATTERNS = [
 ]
 
 
+# Patterns for detecting business names so the greeting helper can fall back
+# to "Hi there" instead of awkwardly using a non-person first name.
+_BUSINESS_RE = re.compile(
+    r"\b("
+    r"LLC|Inc\.?|Corp\.?|Co\.?|Company|Companies|Group|Holdings|Trust|Estate|"
+    r"Foundation|Association|HOA|Properties|Partners|Partnership|"
+    r"Restaurant|Cafe|Studios?|Apartments?|Condos?|Condominiums?|"
+    r"Theatre|Theater|Church|Synagogue|Temple|Mosque|"
+    r"School|University|College|Hospital|Clinic|Center|Centre"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_business(name: str) -> bool:
+    return bool(name) and bool(_BUSINESS_RE.search(name))
+
+
+def _first_names(name: str) -> list[str]:
+    """Pull first name(s) from messy formats:
+      'Smith, John'            → ['John']
+      'Smith, John & Jane'     → ['John', 'Jane']
+      'John & Jane Smith'      → ['John', 'Jane']
+      'John Smith'             → ['John']
+    Returns [] for businesses or empty input.
+    """
+    if not name or _is_business(name):
+        return []
+    # Strip honorifics
+    name = re.sub(r"\b(Mr|Mrs|Ms|Dr|Rev|Fr|Sr|Jr)\.?\s+", "", name, flags=re.IGNORECASE)
+    if "," in name:
+        # "Last, First [& Other]"
+        first_part = name.split(",", 1)[1].strip()
+    else:
+        # "First [& Other] Last" — drop the last word as the surname
+        words = name.split()
+        first_part = " ".join(words[:-1]) if len(words) > 1 else name
+    parts = re.split(r"\s*(?:&|\band\b|\+|/)\s*", first_part)
+    out = []
+    for p in parts:
+        toks = p.strip().split()
+        if toks:
+            out.append(toks[0])
+    return out[:2]  # cap at two for greeting purposes
+
+
+def _greeting(name: str) -> str:
+    if _is_business(name):
+        return "Hi there"
+    firsts = _first_names(name)
+    if not firsts:
+        return "Hi there"
+    if len(firsts) == 1:
+        return f"Hi {firsts[0]}"
+    return f"Hey {firsts[0]} and {firsts[1]}"
+
+
+def _days_phrase(days: int | None) -> str:
+    """Natural-language 'how long ago' phrasing."""
+    if days is None or days < 0:
+        return "recently"
+    if days == 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    if days <= 4:
+        return "a few days ago"
+    if days <= 10:
+        return "about a week ago"
+    if days <= 17:
+        return "a week and a half ago"
+    if days <= 24:
+        return "a couple weeks ago"
+    if days <= 38:
+        return "about a month ago"
+    if days <= 55:
+        return "about six weeks ago"
+    if days <= 75:
+        return "a couple months ago"
+    if days <= 130:
+        return "a few months ago"
+    months = days // 30
+    return f"about {months} months ago"
+
+
+# Known brands we expect to follow with a product type. If we extracted
+# JUST the brand with no product type, append "unit" so "the new AO Smith"
+# becomes "the new AO Smith unit" rather than the awkward bare brand.
+_KNOWN_BRANDS_LOWER = {
+    "ao smith", "a.o. smith", "bradford white", "rheem", "rinnai", "navien",
+    "noritz", "trane", "carrier", "lennox", "goodman", "amana", "daikin",
+    "mitsubishi", "bryant", "york", "american standard", "bosch", "heil",
+    "coleman", "ruud",
+}
+
+
+def _equipment_phrase(eq: str) -> str:
+    """Format the extracted equipment label for use in an opener template."""
+    eq = eq.strip()
+    if eq.lower() in _KNOWN_BRANDS_LOWER:
+        return f"the new {eq} unit"
+    return f"the new {eq}"
+
+
+# Three template variants per kind so Fey doesn't see the same phrasing on
+# every row. Pick deterministically by hashing customer_id so the same lead
+# gets the same opener across email re-renders within a suppression window.
+_MEMBERSHIP_TEMPLATES = [
+    "{greet}, it's Fey at Pure Comfort — wanted to check in on {eq} we installed {when}. How's it running for you?",
+    "{greet}, it's Fey from Pure Comfort. Just following up on {eq} we put in {when} — everything working smoothly?",
+    "{greet}, Fey here at Pure Comfort — wanted to make sure {eq} we installed {when} is running well. How's it been?",
+]
+
+
+def _template_opener(c: dict) -> str | None:
+    """Generate an opener via Python template when data is clean enough.
+    Returns None to defer to Claude (relationship-based, edge cases, etc.)."""
+    kind = c.get("kind")
+    if kind != "membership":
+        # Sleeping & missed are better off with Claude — they lean on
+        # relationship context, recency, or call-type phrasing that
+        # benefits from the model's variability.
+        return None
+
+    eq = c.get("equipment_extracted")
+    if not eq:
+        return None  # nothing concrete to anchor the opener — let Claude try
+
+    name = c.get("customer_name") or ""
+    days = c.get("install_days_ago")
+    cid = c.get("customer_id") or 0
+
+    template = _MEMBERSHIP_TEMPLATES[cid % len(_MEMBERSHIP_TEMPLATES)]
+    return template.format(
+        greet=_greeting(name),
+        eq=_equipment_phrase(eq),
+        when=_days_phrase(days),
+    )
+
+
 def _extract_equipment(text: str | None) -> str | None:
     """Pull a short '<brand> <product>' or '<product>' phrase from messy
     install notes. Returns None if nothing recognizable is found.
@@ -82,19 +222,12 @@ def _extract_equipment(text: str | None) -> str | None:
     brand_re = "|".join(_BRAND_PATTERNS)
     product_re = "|".join(_PRODUCT_PATTERNS)
 
-    def _title(s: str) -> str:
-        # Brand names like "AO Smith" / "Bradford White" / "Trane" should
-        # stay in their natural casing. Title-case any all-lowercase tokens
-        # but preserve mixed-case ones (Trane → Trane, ao smith → AO Smith).
-        words = s.split()
-        out = []
-        for w in words:
-            if w == w.lower():
-                # All lowercase — title case it
-                out.append(w.title())
-            else:
-                out.append(w)
-        return " ".join(out)
+    def _title_brand(s: str) -> str:
+        """Title-case a brand only if it came in all-lowercase. Preserve
+        mixed-case brands like 'AO Smith' / 'Trane' verbatim."""
+        if s == s.lower():
+            return s.title()
+        return s
 
     # Best match: "<brand> ... <product>" within 60 chars of each other
     m = re.search(
@@ -102,17 +235,19 @@ def _extract_equipment(text: str | None) -> str | None:
         txt, flags=re.IGNORECASE,
     )
     if m:
-        return _title(f"{m.group(1)} {m.group(2)}").replace("  ", " ")
+        # Brand keeps its natural casing; product type stays lowercase
+        # so we render "Bradford White water heater", not "Bradford White
+        # Water Heater" (the latter reads like a product SKU, not prose).
+        return f"{_title_brand(m.group(1))} {m.group(2).lower()}"
 
     # Second best: standalone brand mention
     m = re.search(rf"\b({brand_re})\b", txt, flags=re.IGNORECASE)
     if m:
-        return _title(m.group(1))
+        return _title_brand(m.group(1))
 
     # Third best: standalone product type
     m = re.search(rf"\b({product_re})\b", txt, flags=re.IGNORECASE)
     if m:
-        # Product types stay lowercase ("water heater", "sewer line")
         return m.group(1).lower()
 
     return None
@@ -253,30 +388,56 @@ def _format_customer(c: dict) -> str:
 
 
 def generate_openers(customers: list[dict], model: str | None = None) -> dict[int, str]:
-    """Batch-generate openers. Returns customer_id -> opener text.
+    """Hybrid opener generator (templates + LLM).
 
-    Customers without customer_id are skipped (unmatched missed callers).
-    On any failure, returns empty dict so the caller can fall back to the
-    generic call script.
+    Step 1 — pre-extract clean equipment phrases from raw fields and try
+    the Python template layer per customer. This wins for membership rows
+    where we recognized the brand/product: deterministic, free, and
+    guarantees the equipment is named (which Sonnet/Opus stubbornly
+    refuse to do when reading messy install-notes text).
+
+    Step 2 — for customers the templates don't handle (sleeping, missed,
+    or memberships with no recognized equipment), batch into a single
+    Claude call. Templates already-handled get the deterministic opener;
+    Claude handles the relationship-based / edge cases.
+
+    Returns customer_id -> opener text. Customers without customer_id are
+    skipped. On any Claude failure, the template results still come back.
     """
+    out: dict[int, str] = {}
+    for_llm: list[dict] = []
+
+    for c in customers:
+        if not c.get("customer_id"):
+            continue
+        # Pre-extract from whichever source is populated, stash on the
+        # dict so both the template path and the LLM prompt can use it.
+        if "equipment_extracted" not in c:
+            c["equipment_extracted"] = (
+                _extract_equipment(c.get("equipment"))
+                or _extract_equipment(c.get("install_summary"))
+            )
+        templated = _template_opener(c)
+        if templated:
+            out[c["customer_id"]] = templated
+        else:
+            for_llm.append(c)
+
+    if not for_llm:
+        return out
+
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        return {}
-
-    eligible = [c for c in customers if c.get("customer_id")]
-    if not eligible:
-        return {}
+        return out  # templates only — still better than nothing
 
     model = model or os.environ.get("CALL_OPENER_MODEL") or _DEFAULT_MODEL
     body = (
         "Generate one opener per customer:\n\n"
-        + "\n\n".join(_format_customer(c) for c in eligible)
+        + "\n\n".join(_format_customer(c) for c in for_llm)
     )
 
     try:
         client = anthropic.Anthropic(api_key=api_key)
-        # ~80-100 tokens per opener × up to 50 customers = need headroom.
-        # 8192 is plenty without being wasteful.
         response = client.messages.create(
             model=model,
             max_tokens=8192,
@@ -284,19 +445,18 @@ def generate_openers(customers: list[dict], model: str | None = None) -> dict[in
             messages=[{"role": "user", "content": body}],
         )
         raw = next((b.text for b in response.content if b.type == "text"), "").strip()
-        # Strip any markdown fences if Claude wrapped the JSON
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[1] if "\n" in raw else raw
             if raw.rstrip().endswith("```"):
                 raw = raw.rsplit("```", 1)[0]
         data = json.loads(raw.strip())
-        out: dict[int, str] = {}
         for k, v in data.items():
             try:
                 out[int(k)] = str(v).strip()
             except (ValueError, TypeError):
                 continue
-        return out
     except Exception as exc:
-        print(f"[call_openers] generation failed: {exc}")
-        return {}
+        print(f"[call_openers] LLM batch failed: {exc}")
+        # Template results already in `out` — return them anyway.
+
+    return out
