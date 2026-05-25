@@ -35,6 +35,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from lib.call_openers import generate_openers  # noqa: E402
 from lib.database import db  # noqa: E402
 from lib.email_utils import (  # noqa: E402
     exclude,
@@ -724,7 +725,8 @@ def _status_badge(*, pending_days: int | None, outreach_info: dict | None) -> st
 def html_customer_row(*, name: str, phone: str, email: str, primary_line: str,
                       history_line: str, pending_days: int | None = None,
                       outreach_info: dict | None = None,
-                      action_links_html: str = "") -> str:
+                      action_links_html: str = "",
+                      opener_text: str | None = None) -> str:
     phone_disp = fmt_phone(phone)
     phone_html = (
         f"<a href='{escape(tel_href(phone))}' style='color:#0066EE;text-decoration:none;font-weight:600'>{escape(phone_disp)}</a>"
@@ -735,12 +737,23 @@ def html_customer_row(*, name: str, phone: str, email: str, primary_line: str,
         if email else ""
     )
     badge = _status_badge(pending_days=pending_days, outreach_info=outreach_info)
+    opener_html = ""
+    if opener_text:
+        opener_html = (
+            f"<div style='margin-top:8px;padding:8px 10px;background:#EFF6FF;"
+            f"border-left:3px solid #0066EE;border-radius:4px;font-size:13px;"
+            f"color:#1E3A8A;line-height:1.45'>"
+            f"<span style='font-size:11px;font-weight:700;color:#1E40AF;"
+            f"text-transform:uppercase;letter-spacing:0.04em'>✨ Opener</span> "
+            f"<i>{escape(opener_text)}</i></div>"
+        )
     return f"""
 <div style="border-top:1px solid #f0f0f0;padding:10px 0">
   <div style="font-size:15px;font-weight:600;color:#111">{escape(name)}{badge}</div>
   <div style="font-size:14px;margin:2px 0 4px">{phone_html}{email_html}</div>
   <div style="font-size:13px;color:#333">{primary_line}</div>
   <div style="font-size:12px;color:#777;margin-top:2px">{history_line}</div>
+  {opener_html}
   {action_links_html}
 </div>
 """
@@ -834,6 +847,51 @@ def main() -> int:
             r["phone"] = r.get("from_phone") or ""
             r["email"] = ""
 
+    # ---- Personalized openers (one batched Claude call) ----
+    today_d = date.today()
+    opener_customers: list[dict] = []
+    for r in memberships:
+        install_date = r.get("install_date")
+        opener_customers.append({
+            "customer_id":      r.get("customer_id"),
+            "customer_name":    r.get("customer_name"),
+            "kind":             "membership",
+            "equipment":        r.get("equipment"),
+            "install_days_ago": (today_d - install_date).days if install_date else None,
+            "install_value":    float(r.get("install_value") or 0),
+            "lifetime_revenue": float(r.get("lifetime_revenue") or 0),
+            "lifetime_invoices": int(r.get("lifetime_invoices") or 0),
+            "first_visit_year": r["first_visit"].year if r.get("first_visit") else None,
+        })
+    for r in sleeping:
+        last_visit = r.get("last_visit")
+        opener_customers.append({
+            "customer_id":         r.get("customer_id"),
+            "customer_name":       r.get("customer_name"),
+            "kind":                "sleeping",
+            "last_visit_days_ago": (today_d - last_visit).days if last_visit else None,
+            "last_summary":        r.get("last_summary"),
+            "loyal_revenue":       float(r.get("loyal_revenue") or 0),
+            "loyal_invoices":      int(r.get("loyal_invoices") or 0),
+        })
+    for r in missed:
+        received = r.get("received_on")
+        last_visit = r.get("last_visit")
+        opener_customers.append({
+            "customer_id":         r.get("customer_id"),
+            "customer_name":       r.get("customer_name") or "Unknown",
+            "kind":                "missed",
+            "call_type":           r.get("call_type"),
+            "call_when":           received.strftime("%a %I:%M %p") if received else "earlier",
+            "lifetime_revenue":    float(r.get("lifetime_revenue") or 0),
+            "lifetime_invoices":   int(r.get("lifetime_invoices") or 0),
+            "last_visit_days_ago": (today_d - last_visit).days if last_visit else None,
+        })
+
+    print(f"Generating personalized openers via Claude for {len([c for c in opener_customers if c.get('customer_id')])} customers…")
+    opener_map = generate_openers(opener_customers)
+    print(f"  · got {len(opener_map)} openers back")
+
     # ---- Build HTML sections ----
     def _row_status(customer_id: int | None, dkey: str) -> dict:
         """Compute badge inputs for one row."""
@@ -847,6 +905,7 @@ def main() -> int:
             name=r.get("customer_name") or "Customer",
             phone=r.get("phone") or "",
             email=r.get("email") or "",
+            opener_text=opener_map.get(r.get("customer_id")),
             **_row_status(r.get("customer_id"), dedup_key("membership", r.get("customer_id"))),
             action_links_html=render_action_links("membership", r.get("customer_id")),
             primary_line=(
@@ -870,6 +929,7 @@ def main() -> int:
             name=r.get("customer_name") or "Customer",
             phone=r.get("phone") or "",
             email=r.get("email") or "",
+            opener_text=opener_map.get(r.get("customer_id")),
             **_row_status(r.get("customer_id"), dedup_key("sleeping", r.get("customer_id"))),
             action_links_html=render_action_links("sleeping", r.get("customer_id")),
             primary_line=(
@@ -890,6 +950,7 @@ def main() -> int:
             name=r.get("customer_name") or "Unknown caller",
             phone=r.get("phone") or "",
             email=r.get("email") or "",
+            opener_text=opener_map.get(r.get("customer_id")),
             **_row_status(r.get("customer_id"), dedup_key("missed", r.get("customer_id"), r.get("id"))),
             action_links_html=render_action_links("missed", r.get("customer_id"), r.get("id")),
             primary_line=(
