@@ -487,9 +487,13 @@ def load_recommendation_state(conn) -> dict:
             first_seen[r["dedup_key"]] = r["first_seen"]
 
         # 2. For customers with prior recs, look up outbound/inbound calls
-        #    since their first recommendation. We compute attempt count + a
-        #    conversation flag (long-enough outbound call) so we can tell
-        #    voicemails apart from real conversations.
+        #    since their reference point. Reference = the earlier of:
+        #      (a) when they first showed up on a recommendation list, OR
+        #      (b) the earliest missed call from them in our lookback window
+        #    Using (b) when earlier catches the case where Fey calls back the
+        #    same day a customer missed us — that outbound happens BEFORE the
+        #    next morning's email is sent, but we still want to detect it as
+        #    outreach against the missed-call recommendation.
         cur.execute(
             f"""
             WITH first_recs AS (
@@ -497,6 +501,22 @@ def load_recommendation_state(conn) -> dict:
               FROM csr_recommendations
               WHERE sent_at >= %s AND customer_id IS NOT NULL
               GROUP BY customer_id
+            ),
+            first_missed AS (
+              SELECT customer_id, MIN(created_on) AS first_missed_at
+              FROM calls
+              WHERE direction = 'Inbound'
+                AND call_type IN ('Abandoned', 'Unbooked')
+                AND customer_id IS NOT NULL
+                AND created_on >= NOW() - INTERVAL '30 days'
+              GROUP BY customer_id
+            ),
+            reference AS (
+              SELECT fr.customer_id,
+                     LEAST(fr.first_rec_at,
+                           COALESCE(fm.first_missed_at, fr.first_rec_at)) AS reference_at
+              FROM first_recs fr
+              LEFT JOIN first_missed fm ON fm.customer_id = fr.customer_id
             )
             SELECT
               c.customer_id,
@@ -511,8 +531,8 @@ def load_recommendation_state(conn) -> dict:
               MAX(c.created_on) FILTER (WHERE c.direction = 'Outbound')           AS last_outbound,
               MAX(c.created_on) FILTER (WHERE c.direction = 'Inbound')            AS last_inbound
             FROM calls c
-            JOIN first_recs fr ON fr.customer_id = c.customer_id
-            WHERE c.created_on >= fr.first_rec_at
+            JOIN reference r ON r.customer_id = c.customer_id
+            WHERE c.created_on >= r.reference_at
             GROUP BY c.customer_id
             """,
             (cutoff,),
