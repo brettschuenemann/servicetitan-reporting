@@ -78,35 +78,44 @@ def _load_sections() -> dict:
     }
 
 
-@st.cache_data(ttl=4 * 3600, show_spinner=False)
-def _generate_openers_cached(opener_inputs_tuple: tuple) -> dict[int, str]:
-    """Cache openers for 4 hours so page reloads/reruns don't re-call Claude.
+# Module-level per-customer opener cache. Lives for the lifetime of the
+# Streamlit process (cleared on app reboot). Keyed by customer_id so
+# clicking an action button doesn't invalidate the openers for the OTHER
+# customers — only new arrivals trigger a Claude call.
+_OPENER_CACHE: dict[int, tuple[datetime, str]] = {}
+_OPENER_TTL_SECONDS = 4 * 3600
 
-    Takes a tuple of frozen customer dicts (tuple-of-tuples form) so the
-    cache key is hashable. Returns customer_id -> opener string.
+
+def _get_openers_with_cache(customer_inputs: list[dict]) -> dict[int, str]:
+    """Per-customer caching for openers. Returns customer_id -> opener.
+
+    Customers with a fresh entry in `_OPENER_CACHE` are returned from
+    memory. Anyone without (or expired) is sent to Claude in a single
+    batched call so we still amortize the API round-trip.
     """
-    customers = [dict(items) for items in opener_inputs_tuple]
-    return generate_openers(customers)
+    now = datetime.now()
+    result: dict[int, str] = {}
+    to_generate: list[dict] = []
 
+    for c in customer_inputs:
+        cid = c.get("customer_id")
+        if not cid:
+            continue
+        hit = _OPENER_CACHE.get(int(cid))
+        if hit:
+            ts, opener = hit
+            if (now - ts).total_seconds() < _OPENER_TTL_SECONDS:
+                result[int(cid)] = opener
+                continue
+        to_generate.append(c)
 
-def _freeze_for_cache(customers: list[dict]) -> tuple:
-    """Convert list-of-dicts to hashable form for st.cache_data."""
-    out = []
-    for c in customers:
-        # Only include hashable, opener-relevant keys
-        items = []
-        for k in ("customer_id", "customer_name", "kind", "equipment",
-                  "install_summary", "install_days_ago", "install_value",
-                  "lifetime_revenue", "lifetime_invoices", "first_visit_year",
-                  "last_visit_days_ago", "last_summary", "last_items",
-                  "loyal_revenue", "loyal_invoices",
-                  "call_type", "call_when", "last_invoice_summary"):
-            v = c.get(k)
-            if isinstance(v, list):
-                v = tuple(v)
-            items.append((k, v))
-        out.append(tuple(items))
-    return tuple(out)
+    if to_generate:
+        new_openers = generate_openers(to_generate)
+        for cid, opener in new_openers.items():
+            _OPENER_CACHE[int(cid)] = (now, opener)
+            result[int(cid)] = opener
+
+    return result
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -427,7 +436,7 @@ for r in missed_visible:
         "last_invoice_summary": r.get("last_invoice_summary"),
     })
 
-opener_map = _generate_openers_cached(_freeze_for_cache(opener_inputs))
+opener_map = _get_openers_with_cache(opener_inputs)
 
 # Bulk-load notes for everyone visible (one round trip)
 all_cust_ids = [r.get("customer_id") for r in all_visible if r.get("customer_id")]

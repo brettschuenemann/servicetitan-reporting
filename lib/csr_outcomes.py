@@ -110,7 +110,13 @@ def undo_outcome(conn, outcome_id: int) -> None:
 
 def load_todays_outcomes(conn) -> list[dict]:
     """Outcomes recorded today (Chicago time), newest first. For the
-    'completed today' rollup on the call list page."""
+    'completed today' rollup on the call list page.
+
+    Excludes both the 'undone' sentinel rows AND any outcomes that have
+    been superseded by a later 'undone' row — so when Fey clicks Undo,
+    the customer fully disappears from this list and the KPI count
+    drops to match.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -126,6 +132,12 @@ def load_todays_outcomes(conn) -> list[dict]:
             WHERE (o.recorded_at AT TIME ZONE 'America/Chicago')::date =
                   (NOW()         AT TIME ZONE 'America/Chicago')::date
               AND o.outcome <> 'undone'
+              AND NOT EXISTS (
+                SELECT 1 FROM csr_customer_outcomes u
+                WHERE u.dedup_key = o.dedup_key
+                  AND u.recorded_at > o.recorded_at
+                  AND u.outcome = 'undone'
+              )
             ORDER BY o.recorded_at DESC
             """
         )
