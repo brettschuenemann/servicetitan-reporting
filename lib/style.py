@@ -494,16 +494,112 @@ footer {{ visibility: hidden !important; height: 0 !important; }}
 
 
 def _apply_plotly_brand_palette() -> None:
-    """Set the brand palette as the Plotly default for all px.* charts."""
+    """Modernize all Plotly charts: cleaner axes, better typography,
+    unified hover tooltips, breathing-room margins, brand palette.
+
+    Built on top of `simple_white` (more minimal than `plotly_white`)
+    then refined. Every chart in the app inherits these defaults; no
+    per-chart changes needed.
+    """
     px.defaults.color_discrete_sequence = BRAND_PALETTE
-    pio.templates["pure_comfort"] = pio.templates["plotly_white"]
+    pio.templates["pure_comfort"] = pio.templates["simple_white"]
     tmpl = pio.templates["pure_comfort"]
+
+    # ----- Typography -----
     tmpl.layout.font.family = "Inter, -apple-system, BlinkMacSystemFont, sans-serif"
     tmpl.layout.font.color = TEXT
+    tmpl.layout.font.size = 12
+
+    # ----- Surfaces -----
+    # Transparent paper so charts blend with the app bg (#FAFBFC) and any
+    # surrounding containers. Plot area stays white for contrast.
+    tmpl.layout.paper_bgcolor = "rgba(0,0,0,0)"
+    tmpl.layout.plot_bgcolor = "rgba(0,0,0,0)"
+
+    # ----- Brand colors -----
     tmpl.layout.colorway = BRAND_PALETTE
+
+    # ----- Title — left-aligned, modern weight -----
     tmpl.layout.title.font.color = NAVY
-    tmpl.layout.xaxis.gridcolor = "#eef0f3"
-    tmpl.layout.yaxis.gridcolor = "#eef0f3"
+    tmpl.layout.title.font.size = 15
+    tmpl.layout.title.x = 0
+    tmpl.layout.title.xanchor = "left"
+    tmpl.layout.title.y = 0.97
+
+    # ----- Axes — minimal chrome -----
+    # Hide axis lines + tick marks; keep labels only. Lighter gridlines.
+    axis_common = dict(
+        showline=False,
+        linecolor=BORDER,
+        ticks="",
+        tickfont=dict(color=MUTED, size=11),
+        title=dict(font=dict(color=MUTED, size=11)),
+        zeroline=False,
+        showgrid=True,
+        gridcolor="#F1F5F9",   # slate-100, barely visible
+        gridwidth=1,
+    )
+    tmpl.layout.xaxis.update(axis_common)
+    tmpl.layout.yaxis.update(axis_common)
+    # X-axis usually doesn't need gridlines on bar/line charts
+    tmpl.layout.xaxis.showgrid = False
+
+    # ----- Legend — horizontal, top, no border -----
+    tmpl.layout.legend.font.size = 11
+    tmpl.layout.legend.font.color = TEXT
+    tmpl.layout.legend.orientation = "h"
+    tmpl.layout.legend.yanchor = "bottom"
+    tmpl.layout.legend.y = 1.02
+    tmpl.layout.legend.xanchor = "left"
+    tmpl.layout.legend.x = 0
+    tmpl.layout.legend.bgcolor = "rgba(0,0,0,0)"
+    tmpl.layout.legend.bordercolor = "rgba(0,0,0,0)"
+    tmpl.layout.legend.borderwidth = 0
+
+    # ----- Hover — unified, branded tooltip -----
+    tmpl.layout.hovermode = "x unified"
+    tmpl.layout.hoverlabel.bgcolor = "white"
+    tmpl.layout.hoverlabel.bordercolor = BORDER
+    tmpl.layout.hoverlabel.font.family = "Inter, sans-serif"
+    tmpl.layout.hoverlabel.font.size = 12
+    tmpl.layout.hoverlabel.font.color = TEXT
+
+    # ----- Margins — more breathing room (top room for legend) -----
+    tmpl.layout.margin = dict(l=10, r=10, t=40, b=10)
+
+    # ----- Bar trace defaults — no borders, sized text labels -----
+    tmpl.data.bar = [
+        dict(
+            marker=dict(line=dict(width=0)),
+            textfont=dict(family="Inter, sans-serif", size=11, color=TEXT),
+            textposition="outside",
+            cliponaxis=False,  # let text labels render beyond axis
+        )
+    ]
+
+    # ----- Scatter / line trace defaults — thicker lines, no markers by default -----
+    tmpl.data.scatter = [
+        dict(
+            line=dict(width=2.5),
+            marker=dict(size=6, line=dict(width=0)),
+            hovertemplate=None,  # rely on unified hover
+        )
+    ]
+
+    # ----- Pie / donut defaults — clean text, no outline -----
+    tmpl.data.pie = [
+        dict(
+            textfont=dict(family="Inter, sans-serif", size=12, color="white"),
+            marker=dict(line=dict(color="white", width=2)),
+            hole=0.55,  # default to donut over pie — reads more modern
+        )
+    ]
+
+    # ----- Modebar (the toolbar) — hide most icons, keep download -----
+    tmpl.layout.modebar.bgcolor = "rgba(0,0,0,0)"
+    tmpl.layout.modebar.color = SUBTLE
+    tmpl.layout.modebar.activecolor = PRIMARY
+
     pio.templates.default = "pure_comfort"
 
 
