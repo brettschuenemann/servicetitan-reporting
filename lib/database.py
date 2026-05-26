@@ -300,6 +300,22 @@ CREATE TABLE IF NOT EXISTS csr_openers (
     generated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (kind, customer_id, secondary_id)
 );
+
+-- Per-item checkbox state for the "Do This Week" action items on the
+-- Jake Todo page. Items are extracted from ai_summaries.summary_md
+-- when that page loads; we upsert (summary_id, item_index) with the
+-- raw text and preserve any existing checked_at via ON CONFLICT DO
+-- NOTHING. When a new weekly summary is generated, new rows appear
+-- with checked_at NULL; old summaries' rows stay as audit trail.
+CREATE TABLE IF NOT EXISTS ai_summary_todos (
+    id            BIGSERIAL PRIMARY KEY,
+    summary_id    BIGINT NOT NULL REFERENCES ai_summaries(id) ON DELETE CASCADE,
+    item_index    INTEGER NOT NULL,
+    item_text     TEXT NOT NULL,
+    checked_at    TIMESTAMPTZ,
+    UNIQUE (summary_id, item_index)
+);
+CREATE INDEX IF NOT EXISTS ix_ai_todos_summary ON ai_summary_todos(summary_id);
 """
 
 

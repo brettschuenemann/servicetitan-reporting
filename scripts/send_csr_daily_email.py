@@ -319,17 +319,27 @@ def load_sleeping_customers(conn, limit: int = 15) -> list[dict]:
 
 
 def load_open_estimates(conn, min_age_days: int = 30,
+                        max_age_days: int | None = None,
                         min_value: float = 0) -> list[dict]:
-    """Open estimates older than `min_age_days` (Jake handles the fresh ones).
+    """Open estimates in a given age window.
 
-    Sorted by subtotal DESC then age DESC — biggest dollar opportunities
-    first, with the oldest as the tiebreaker. We pull the originating
-    tech name from appointment_assignments where available so Fey can
-    reference it ("the tech who came out, John, mentioned…").
+    Defaults match Fey's bucket on the Call List (>30d). Jake's Todo
+    page passes `min_age_days=0, max_age_days=30` to get the fresh
+    side of the funnel.
+
+    Sorted by subtotal DESC then age DESC — biggest dollar
+    opportunities first, with the oldest as the tiebreaker.
     """
+    upper_clause = ""
+    params: list = [min_age_days]
+    if max_age_days is not None:
+        upper_clause = "AND e.created_on >= NOW() - (%s || ' days')::interval"
+        params.append(max_age_days)
+    params.append(min_value)
+
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             WITH first_tech AS (
               SELECT DISTINCT ON (aa.job_id)
                 aa.job_id,
@@ -369,11 +379,12 @@ def load_open_estimates(conn, min_age_days: int = 30,
             WHERE e.status_name = 'Open'
               AND e.active = TRUE
               AND e.created_on < NOW() - (%s || ' days')::interval
+              {upper_clause}
               AND e.subtotal  >= %s
               AND e.customer_id IS NOT NULL
             ORDER BY e.subtotal DESC, e.created_on ASC
             """,
-            (min_age_days, min_value),
+            params,
         )
         return [dict(r) for r in cur.fetchall()]
 

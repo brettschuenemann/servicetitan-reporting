@@ -45,6 +45,7 @@ OUTCOME_CONFIG: dict[str, dict[str, dict]] = {
     # so dedup is per-estimate (estimate_id passed via the call_id slot).
     "estimate": {
         "sold":         {"label": "Sold",           "expires_days": None, "color": "#10B981"},
+        "working":      {"label": "Working it",     "expires_days": 7,    "color": "#0066EE"},
         "declined":     {"label": "Declined",       "expires_days": 180,  "color": "#EF4444"},
         "voicemail":    {"label": "No answer / VM", "expires_days": 4,    "color": "#F59E0B"},
         "try_later":    {"label": "Try later",      "expires_days": 14,   "color": "#F59E0B"},
