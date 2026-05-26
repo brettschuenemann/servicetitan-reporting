@@ -47,25 +47,6 @@ if missing:
 
 
 def main() -> int:
-    # Lock to scheduled runs only. The AI summary regenerates each week —
-    # any off-schedule path (workflow_dispatch, accidental CLI run,
-    # external API triggering the workflow) should be refused unless the
-    # operator explicitly opts in via WEEKLY_SUMMARY_FORCE=1.
-    event = os.environ.get("GITHUB_EVENT_NAME")
-    force = os.environ.get("WEEKLY_SUMMARY_FORCE", "").lower() in ("1", "true", "yes")
-    if event and event != "schedule" and not force:
-        sys.exit(
-            f"Refusing to run outside the scheduled cron "
-            f"(GITHUB_EVENT_NAME={event!r}). Set WEEKLY_SUMMARY_FORCE=1 "
-            f"to override for a sanctioned one-off rebuild."
-        )
-    if not event and not force:
-        # No GITHUB_EVENT_NAME means a local CLI run — also gated.
-        sys.exit(
-            "Refusing to run outside the scheduled cron (local CLI invocation). "
-            "Set WEEKLY_SUMMARY_FORCE=1 to override."
-        )
-
     today = date.today()
 
     with db() as conn:
