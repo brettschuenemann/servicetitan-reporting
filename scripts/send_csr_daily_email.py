@@ -52,24 +52,19 @@ REQUIRED = (
     "ST_APP_KEY", "ST_TENANT_ID", "ST_CLIENT_ID", "ST_CLIENT_SECRET",
     "DATABASE_URL",
 )
-missing = [k for k in REQUIRED if not os.environ.get(k)]
-if missing:
-    sys.exit(f"Missing env vars: {', '.join(missing)}")
 
-# Recipients (both env vars accept comma- or semicolon-separated lists):
-#   FEY_EMAIL_TO  → primary To: (Fey, can be multiple)
-#   EMAIL_TO      → CC: (Brett + anyone else for visibility)
-# If FEY_EMAIL_TO isn't set, fall back to EMAIL_TO as the To: with no CC.
-_fey_list = parse_recipients(os.environ.get("FEY_EMAIL_TO"))
-_brett_list = parse_recipients(os.environ.get("EMAIL_TO"))
-if _fey_list:
-    TO_LIST = _fey_list
-    CC_LIST = exclude(_brett_list, _fey_list)  # don't duplicate if Fey's in both
-else:
-    TO_LIST = _brett_list
-    CC_LIST = []
-if not TO_LIST:
-    sys.exit("Set FEY_EMAIL_TO (and/or EMAIL_TO) before running.")
+
+def _check_email_env_or_exit() -> None:
+    """Abort if required env vars or recipients are missing. Called from
+    main() only — NOT at module-import time. The Call List page imports
+    this module for its helpers and shouldn't crash when SMTP/EMAIL_TO
+    aren't configured in the Streamlit Cloud environment."""
+    missing = [k for k in REQUIRED if not os.environ.get(k)]
+    if missing:
+        sys.exit(f"Missing env vars: {', '.join(missing)}")
+    if not parse_recipients(os.environ.get("FEY_EMAIL_TO")) and \
+       not parse_recipients(os.environ.get("EMAIL_TO")):
+        sys.exit("Set FEY_EMAIL_TO (and/or EMAIL_TO) before running.")
 
 
 # ---------- formatting helpers ----------
@@ -928,6 +923,11 @@ def _render_notification_html(
 
 
 def main() -> int:
+    # Run env-var checks here (not at import time) so the Call List page
+    # can import this module's helpers without crashing on a Streamlit
+    # Cloud deploy that doesn't have SMTP/EMAIL_TO configured.
+    _check_email_env_or_exit()
+
     client = ServiceTitanClient(
         app_key=os.environ["ST_APP_KEY"], tenant_id=os.environ["ST_TENANT_ID"],
         client_id=os.environ["ST_CLIENT_ID"], client_secret=os.environ["ST_CLIENT_SECRET"],
