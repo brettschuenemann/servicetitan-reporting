@@ -85,67 +85,155 @@ def _load_sections() -> dict:
     }
 
 
-# Module-level per-customer opener cache. Lives for the lifetime of the
-# Streamlit process (cleared on app reboot). Keyed by customer_id so
-# clicking an action button doesn't invalidate the openers for the OTHER
-# customers — only new arrivals trigger a Claude call.
-_OPENER_CACHE: dict[int, tuple[datetime, str]] = {}
-_OPENER_TTL_SECONDS = 4 * 3600
-
-
-def _get_openers_with_cache(customer_inputs: list[dict]) -> dict[int, str]:
-    """Per-customer caching for openers. Returns customer_id -> opener.
-
-    Customers with a fresh entry in `_OPENER_CACHE` are returned from
-    memory. Anyone without (or expired) is sent to Claude in a single
-    batched call so we still amortize the API round-trip.
-    """
-    now = datetime.now()
-    result: dict[int, str] = {}
-    to_generate: list[dict] = []
-
-    for c in customer_inputs:
-        cid = c.get("customer_id")
-        if not cid:
-            continue
-        hit = _OPENER_CACHE.get(int(cid))
-        if hit:
-            ts, opener = hit
-            if (now - ts).total_seconds() < _OPENER_TTL_SECONDS:
-                result[int(cid)] = opener
-                continue
-        to_generate.append(c)
-
-    if to_generate:
-        new_openers = generate_openers(to_generate)
-        for cid, opener in new_openers.items():
-            _OPENER_CACHE[int(cid)] = (now, opener)
-            result[int(cid)] = opener
-
-    return result
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def _lookup_contact_cached(customer_id: int) -> tuple[str, str]:
-    """Per-customer phone/email lookup, cached for a day."""
-    return lookup_contact(get_client(), customer_id)
-
+# ---------- contact + opener caches now live in Postgres ----------
+# Rationale: a Streamlit Cloud container restart used to wipe the
+# in-memory cache, triggering 40 ServiceTitan API calls + ~30 Claude
+# calls on the next page load (10-15s cold load). Persisting both to
+# Postgres means restarts cost ~0; only genuinely new customers /
+# new estimates ever trigger an upstream call.
 
 def _bulk_lookup_contacts(customer_ids: list[int],
                           max_workers: int = 12) -> dict[int, tuple[str, str]]:
-    """Look up phone/email for many customers in parallel.
+    """Resolve phone/email per customer, DB-first.
 
-    Each individual lookup is still @st.cache_data wrapped, so warm
-    customers return instantly from cache. Only the cold-cache misses
-    hit ServiceTitan — and they do so concurrently rather than serially.
-    Cuts a 12s cold-load on ~40 customers down to ~1-2s.
+    1. Read everything we have from `customer_contacts`
+    2. For misses, parallel-fetch from ServiceTitan
+    3. Persist new fetches back to `customer_contacts` so the next page
+       load (and any other process) skips the API entirely
     """
     unique_ids = list({int(c) for c in customer_ids if c})
     if not unique_ids:
         return {}
+
+    # 1. Cached rows from Postgres
+    with db() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT customer_id, phone, email FROM customer_contacts "
+            "WHERE customer_id = ANY(%s)",
+            (unique_ids,),
+        )
+        result: dict[int, tuple[str, str]] = {
+            int(r["customer_id"]): (r["phone"] or "", r["email"] or "")
+            for r in cur.fetchall()
+        }
+
+    # 2. Parallel fetch the misses (if any)
+    missing = [c for c in unique_ids if c not in result]
+    if not missing:
+        return result
+
+    client = get_client()
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        results = list(ex.map(_lookup_contact_cached, unique_ids))
-    return dict(zip(unique_ids, results))
+        fetched = dict(zip(missing,
+                           ex.map(lambda c: lookup_contact(client, c), missing)))
+
+    # 3. Persist back so future loads (and other processes) read from DB
+    if fetched:
+        from psycopg2.extras import execute_values
+        with db() as conn, conn.cursor() as cur:
+            execute_values(
+                cur,
+                "INSERT INTO customer_contacts (customer_id, phone, email) "
+                "VALUES %s "
+                "ON CONFLICT (customer_id) DO UPDATE SET "
+                "  phone = EXCLUDED.phone, "
+                "  email = EXCLUDED.email, "
+                "  fetched_at = NOW()",
+                [(cid, p, e) for cid, (p, e) in fetched.items()],
+            )
+            conn.commit()
+        result.update(fetched)
+
+    return result
+
+
+def _opener_keys_for(customer_inputs: list[dict]) -> list[tuple[str, int, int] | None]:
+    """Composite (kind, customer_id, secondary_id) for each input.
+
+    secondary_id is the estimate_id for estimate rows (so a customer
+    with two open quotes gets two distinct openers); 0 for everyone
+    else. Returns None for entries without a customer_id.
+    """
+    keys: list[tuple[str, int, int] | None] = []
+    for c in customer_inputs:
+        cid = c.get("customer_id")
+        if not cid:
+            keys.append(None)
+            continue
+        kind = c.get("kind", "")
+        sec = c.get("estimate_id") or 0 if kind == "estimate" else 0
+        keys.append((kind, int(cid), int(sec)))
+    return keys
+
+
+def _get_openers_with_cache(customer_inputs: list[dict]) -> dict[int, str]:
+    """Opener resolution, DB-first.
+
+    Returns customer_id -> opener (keyed by cid for backward compat
+    with the renderer). Reads existing openers from `csr_openers` so
+    Streamlit Cloud restarts don't re-pay Claude. Only inputs without
+    a stored row trigger a (batched) Claude call, and new openers get
+    persisted immediately.
+    """
+    if not customer_inputs:
+        return {}
+
+    keys = _opener_keys_for(customer_inputs)
+    needed = list({k for k in keys if k})
+    if not needed:
+        return {}
+
+    # 1. Pull existing rows in a single round-trip
+    with db() as conn, conn.cursor() as cur:
+        placeholders = ",".join(["(%s,%s,%s)"] * len(needed))
+        params = [v for t in needed for v in t]
+        cur.execute(
+            f"SELECT kind, customer_id, secondary_id, opener FROM csr_openers "
+            f"WHERE (kind, customer_id, secondary_id) IN ({placeholders})",
+            params,
+        )
+        db_openers: dict[tuple[str, int, int], str] = {
+            (r["kind"], int(r["customer_id"]), int(r["secondary_id"])): r["opener"]
+            for r in cur.fetchall()
+        }
+
+    # 2. Generate the misses (single batched Claude call amortizes the round-trip)
+    to_generate = [c for c, k in zip(customer_inputs, keys)
+                   if k and k not in db_openers]
+    new_openers_by_cid: dict[int, str] = {}
+    if to_generate:
+        new_openers_by_cid = generate_openers(to_generate)
+
+    # 3. Persist new openers (composite-key upsert)
+    if new_openers_by_cid:
+        rows = []
+        for c, k in zip(customer_inputs, keys):
+            if k and k not in db_openers:
+                cid = k[1]
+                if cid in new_openers_by_cid:
+                    rows.append((k[0], k[1], k[2], new_openers_by_cid[cid]))
+        if rows:
+            from psycopg2.extras import execute_values
+            with db() as conn, conn.cursor() as cur:
+                execute_values(
+                    cur,
+                    "INSERT INTO csr_openers "
+                    "  (kind, customer_id, secondary_id, opener) VALUES %s "
+                    "ON CONFLICT (kind, customer_id, secondary_id) DO UPDATE SET "
+                    "  opener = EXCLUDED.opener, generated_at = NOW()",
+                    rows,
+                )
+                conn.commit()
+
+    # 4. Final map keyed by customer_id (renderer expects this)
+    result: dict[int, str] = {}
+    for c, k in zip(customer_inputs, keys):
+        if not k:
+            continue
+        opener = db_openers.get(k) or new_openers_by_cid.get(k[1])
+        if opener:
+            result[k[1]] = opener
+    return result
 
 
 # ---------- action callbacks (clear caches + rerun handled by Streamlit) ----------

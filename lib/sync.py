@@ -740,12 +740,16 @@ def sync_for_email(
     conn: psycopg2.extensions.connection,
     progress: ProgressCallback = _noop,
 ) -> dict:
-    """Best-effort incremental sync used right before sending an email.
+    """Best-effort incremental sync used right before sending an email
+    and by the hourly background cron.
 
     Pulls everything modified since the last sync (handled internally by
     each entity's sync_state). Failures are logged but don't raise — we
     always want the email to go out, even if ST is temporarily unhappy.
     Email runs against whatever data was successfully fetched.
+
+    Last step pre-warms `customer_contacts` for Call List candidates so
+    the page never has to hit ST for phone/email on cold loads.
     """
     results: dict[str, dict] = {}
     steps = [
@@ -756,6 +760,7 @@ def sync_for_email(
         ("calls", sync_calls),
         ("appointment_assignments", sync_appointment_assignments),
         ("memberships", sync_memberships),
+        ("call_list_contacts", sync_call_list_contacts),
     ]
     for name, fn in steps:
         try:
@@ -764,6 +769,94 @@ def sync_for_email(
             progress(f"sync {name} failed (non-fatal): {exc}")
             results[name] = {"error": str(exc)}
     return results
+
+
+def sync_call_list_contacts(
+    client: ServiceTitanClient,
+    conn: psycopg2.extensions.connection,
+    progress: ProgressCallback = _noop,
+) -> dict:
+    """Pre-fetch phone/email for everyone who might appear on the Call List.
+
+    The Call List page reads contacts from `customer_contacts`. If we keep
+    that table warm, cold page loads stay near-instant instead of paying
+    300ms-per-customer × 40 customers for ST contact lookups.
+
+    Candidate universe:
+      - install / sales-tagged invoices in last 180 days (membership opps)
+      - inbound calls in last 30 days (missed-call follow-ups)
+      - open estimates (estimate follow-ups)
+      - customers with paid invoices 6-24 months ago (sleeping)
+
+    Refresh policy: any contact >7 days old gets re-fetched. Contacts on
+    ServiceTitan change rarely (homeowners don't swap phone numbers), so
+    a weekly refresh is plenty.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    progress("Identifying Call List contact candidates…")
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            -- Union of customers from each of the four call-list source
+            -- queries. LIMIT inside each subquery keeps cron time bounded
+            -- if any single source explodes.
+            WITH candidates AS (
+              SELECT DISTINCT customer_id FROM invoices
+              WHERE invoice_date >= CURRENT_DATE - INTERVAL '180 day'
+                AND customer_id IS NOT NULL
+
+              UNION
+              SELECT DISTINCT customer_id FROM calls
+              WHERE received_on >= NOW() - INTERVAL '30 day'
+                AND customer_id IS NOT NULL
+
+              UNION
+              SELECT DISTINCT customer_id FROM estimates
+              WHERE status_name = 'Open' AND active = TRUE
+                AND customer_id IS NOT NULL
+
+              UNION
+              SELECT DISTINCT customer_id FROM invoices
+              WHERE invoice_date BETWEEN CURRENT_DATE - INTERVAL '24 month'
+                                     AND CURRENT_DATE - INTERVAL '6 month'
+                AND customer_id IS NOT NULL
+            )
+            SELECT c.customer_id
+            FROM candidates c
+            LEFT JOIN customer_contacts cc
+              ON cc.customer_id = c.customer_id
+             AND cc.fetched_at > NOW() - INTERVAL '7 day'
+            WHERE cc.customer_id IS NULL
+            """
+        )
+        to_fetch = [int(r["customer_id"]) for r in cur.fetchall()]
+
+    if not to_fetch:
+        progress("Contacts already fresh — nothing to fetch.")
+        return {"fetched": 0, "skipped_fresh": "all"}
+
+    progress(f"Fetching contacts for {len(to_fetch)} customers (parallel)…")
+
+    # Lazy import so this module stays free of email-script imports
+    from scripts.send_csr_daily_email import lookup_contact
+
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        fetched = list(ex.map(lambda c: (c, lookup_contact(client, c)), to_fetch))
+
+    progress(f"Persisting {len(fetched)} rows…")
+    with conn.cursor() as cur:
+        execute_values(
+            cur,
+            "INSERT INTO customer_contacts (customer_id, phone, email) VALUES %s "
+            "ON CONFLICT (customer_id) DO UPDATE SET "
+            "  phone = EXCLUDED.phone, "
+            "  email = EXCLUDED.email, "
+            "  fetched_at = NOW()",
+            [(cid, p, e) for cid, (p, e) in fetched],
+        )
+    conn.commit()
+    return {"fetched": len(fetched), "candidates": len(to_fetch)}
 
 
 def sync_all(

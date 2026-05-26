@@ -272,6 +272,34 @@ CREATE TABLE IF NOT EXISTS email_sends (
     triggered_by TEXT                    -- 'schedule' | 'workflow_dispatch' | 'cli'
 );
 CREATE INDEX IF NOT EXISTS ix_email_sends_kind_sent ON email_sends(kind, sent_at DESC);
+
+-- Cached per-customer phone/email so the Call List page doesn't hit the
+-- ServiceTitan API once per visible customer per cold load. Pre-warmed
+-- by the hourly sync for active Call List candidates; lazily filled by
+-- the page for anyone the sync missed. Refresh policy: rows older than
+-- 7 days are re-fetched on next sync.
+CREATE TABLE IF NOT EXISTS customer_contacts (
+    customer_id  BIGINT PRIMARY KEY,
+    phone        TEXT,
+    email        TEXT,
+    fetched_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS ix_customer_contacts_fetched ON customer_contacts(fetched_at);
+
+-- Persisted openers so we don't pay Claude every time a Streamlit Cloud
+-- container restarts. Keyed by (kind, customer_id, secondary_id) so
+-- multi-estimate customers / missed-call dedup work correctly. We never
+-- proactively regenerate — the underlying facts (install date, equipment,
+-- estimate value) are essentially immutable. secondary_id defaults to 0
+-- for kinds without a secondary (membership / sleeping).
+CREATE TABLE IF NOT EXISTS csr_openers (
+    kind          TEXT   NOT NULL,
+    customer_id   BIGINT NOT NULL,
+    secondary_id  BIGINT NOT NULL DEFAULT 0,
+    opener        TEXT   NOT NULL,
+    generated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (kind, customer_id, secondary_id)
+);
 """
 
 
