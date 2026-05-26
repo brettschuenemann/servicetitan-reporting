@@ -59,6 +59,13 @@ def lookup_customer_name(customer_id: int | None) -> str:
 
 
 def load_recent_outcomes(limit: int = 30) -> pd.DataFrame:
+    """Most recent outcomes, with Undone ones fully removed.
+
+    Hides both the `'undone'` sentinel row AND any outcome that has been
+    superseded by a later `'undone'` row on the same dedup_key — so when
+    Fey clicks Undo, the entry disappears from this audit list entirely
+    instead of leaving an orphaned trail.
+    """
     with db() as conn, conn.cursor() as cur:
         cur.execute(
             """
@@ -71,6 +78,13 @@ def load_recent_outcomes(limit: int = 30) -> pd.DataFrame:
                    COALESCE(n.name, 'Customer ' || o.customer_id::text) AS customer
             FROM csr_customer_outcomes o
             LEFT JOIN names n ON n.customer_id = o.customer_id
+            WHERE o.outcome <> 'undone'
+              AND NOT EXISTS (
+                SELECT 1 FROM csr_customer_outcomes u
+                WHERE u.dedup_key = o.dedup_key
+                  AND u.recorded_at > o.recorded_at
+                  AND u.outcome = 'undone'
+              )
             ORDER BY o.recorded_at DESC
             LIMIT %s
             """,
