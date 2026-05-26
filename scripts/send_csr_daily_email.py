@@ -364,6 +364,8 @@ def load_open_estimates(conn, min_age_days: int = 30,
               e.created_on,
               e.business_unit_name,
               e.customer_id,
+              e.job_id,
+              e.job_number,
               COALESCE(
                 (SELECT MIN(customer_name) FROM invoices
                  WHERE customer_id = e.customer_id AND customer_name IS NOT NULL),

@@ -38,10 +38,19 @@ from scripts.send_csr_daily_email import (
     fmt_phone,
     load_open_estimates,
     load_recommendation_state,
+    lookup_contact,
     short,
     tel_href,
     to_central,
 )
+from concurrent.futures import ThreadPoolExecutor
+from lib.loaders import get_client
+
+
+# ServiceTitan deep link to an estimate's edit page. Pattern mirrors
+# the call recording URL ST itself returns (`/Call/CallRecording/{id}`).
+# If your tenant uses a different path, swap here.
+ST_ESTIMATE_URL = "https://go.servicetitan.com/Estimate/{id}"
 
 st.set_page_config(page_title="Jake's Todo · Pure Comfort", layout="wide")
 apply_mobile_styles()
@@ -182,11 +191,61 @@ def _bucket_for_estimate(est: dict, latest_outcomes: dict[str, dict]) -> str:
 
 @st.cache_data(ttl=120, show_spinner="Loading Jake's queue…")
 def _load_todo_data() -> dict:
+    """Scope matches the daily Followups email (open estimates ≤7 days)."""
     with db() as conn:
-        estimates = load_open_estimates(conn, min_age_days=0, max_age_days=30)
+        estimates = load_open_estimates(conn, min_age_days=0, max_age_days=7)
         latest_outcomes = _latest_active_outcomes(conn)
-        # Suppression for non-estimate kinds isn't relevant here
     return {"estimates": estimates, "latest_outcomes": latest_outcomes}
+
+
+def _bulk_lookup_contacts(customer_ids: list[int]) -> dict[int, tuple[str, str]]:
+    """Resolve phone/email per customer, DB-first (same pattern as Call List).
+
+    Reads from customer_contacts; falls back to parallel ST API calls for
+    any misses and persists. Customers from active jobs are usually
+    already cached by the hourly sync.
+    """
+    unique_ids = list({int(c) for c in customer_ids if c})
+    if not unique_ids:
+        return {}
+
+    with db() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT customer_id, phone, email FROM customer_contacts "
+            "WHERE customer_id = ANY(%s)",
+            (unique_ids,),
+        )
+        result: dict[int, tuple[str, str]] = {
+            int(r["customer_id"]): (r["phone"] or "", r["email"] or "")
+            for r in cur.fetchall()
+        }
+
+    missing = [c for c in unique_ids if c not in result]
+    if not missing:
+        return result
+
+    client = get_client()
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        fetched = dict(zip(missing,
+                           ex.map(lambda c: lookup_contact(client, c), missing)))
+
+    if fetched:
+        from psycopg2.extras import execute_values
+        with db() as conn, conn.cursor() as cur:
+            execute_values(
+                cur,
+                "INSERT INTO customer_contacts (customer_id, phone, email) "
+                "VALUES %s "
+                "ON CONFLICT (customer_id) DO UPDATE SET "
+                "  phone = EXCLUDED.phone, "
+                "  email = EXCLUDED.email, "
+                "  fetched_at = NOW()",
+                [(cid, p, e) for cid, (p, e) in fetched.items()],
+            )
+            conn.commit()
+        result.update(fetched)
+
+    return result
 
 
 # ---------- callbacks ----------
@@ -224,7 +283,8 @@ def _on_save_note(customer_id: int, note_key: str):
 
 st.title("🎯 Jake's Todo")
 st.caption(
-    f"Fresh open estimates (≤30 days) + this week's strategic action items. "
+    f"Open estimates from the last 7 days (matches the Followups email) "
+    f"+ this week's strategic action items. "
     f"Loaded at {datetime.now().strftime('%-I:%M %p')}"
 )
 
@@ -343,10 +403,17 @@ filtered = [
 ]
 filtered.sort(key=lambda e: (-(float(e.get("subtotal") or 0)), -int(e.get("age_days") or 0)))
 
-# Bulk-load notes
+# Bulk-load notes + contacts (both DB-first, near-zero cost when warm)
 all_cids = [e.get("customer_id") for e in filtered if e.get("customer_id")]
 with db() as _conn:
     notes_map = load_notes_bulk(_conn, all_cids) if all_cids else {}
+contact_map = _bulk_lookup_contacts(all_cids)
+for e in filtered:
+    cid = e.get("customer_id")
+    if cid:
+        e["phone"], e["email"] = contact_map.get(int(cid), ("", ""))
+    else:
+        e["phone"], e["email"] = "", ""
 
 if not filtered:
     empty_state("Nothing matches the current filter.", icon="🔍")
@@ -372,6 +439,28 @@ else:
                     f"border-radius:10px;font-size:11px;font-weight:600;"
                     f"margin-left:8px'>{escape(e['_status_label'])}</span>"
                 )
+            # Phone (clickable tel:) + email + ST deep link to the estimate.
+            phone = (e.get("phone") or "").strip()
+            email = (e.get("email") or "").strip()
+            phone_html = (
+                f"<a href='{escape(tel_href(phone))}' "
+                f"style='color:#0066EE;text-decoration:none;font-weight:600'>"
+                f"📞 {escape(fmt_phone(phone))}</a>"
+                if phone
+                else "<span style='color:#999'>📞 no phone on file</span>"
+            )
+            email_html = (
+                f" · <a href='mailto:{escape(email)}' "
+                f"style='color:#666;text-decoration:none'>✉️ {escape(email)}</a>"
+                if email else ""
+            )
+            st_link = ST_ESTIMATE_URL.format(id=est_id)
+            st_link_html = (
+                f" · <a href='{escape(st_link)}' target='_blank' "
+                f"style='color:#7c3aed;text-decoration:none;font-weight:600'>"
+                f"🔗 View in ServiceTitan</a>"
+            )
+
             st.markdown(
                 f"<div style='font-size:16px;font-weight:600;color:#111'>"
                 f"{escape(e.get('customer_name') or 'Unknown')}{badge}</div>"
@@ -382,7 +471,9 @@ else:
                 + (f" · sent {e['created_on']:%b %d}" if e.get('created_on') else "")
                 + (f" · tech: {escape(tech)}" if tech else "")
                 + (f" · BU: {escape(bu)}" if bu else "")
-                + "</div>",
+                + "</div>"
+                f"<div style='font-size:13px;margin-top:4px'>"
+                f"{phone_html}{email_html}{st_link_html}</div>",
                 unsafe_allow_html=True,
             )
 
