@@ -316,6 +316,30 @@ CREATE TABLE IF NOT EXISTS ai_summary_todos (
     UNIQUE (summary_id, item_index)
 );
 CREATE INDEX IF NOT EXISTS ix_ai_todos_summary ON ai_summary_todos(summary_id);
+
+-- Per-call coaching scores from the nightly scoring pipeline.
+-- The cron downloads the MP3 via /telecom/v2/.../recording, transcribes
+-- via OpenAI Whisper, scores via Claude Sonnet 4.5 against an
+-- inbound or outbound rubric, and upserts here. One row per call_id.
+-- If scoring fails for any reason, we still record a row with `error`
+-- populated so the call doesn't retry forever and waste tokens.
+CREATE TABLE IF NOT EXISTS call_scores (
+    call_id          BIGINT PRIMARY KEY REFERENCES calls(id) ON DELETE CASCADE,
+    scored_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    rubric_version   TEXT NOT NULL DEFAULT 'v1',
+    transcript       TEXT,
+    overall_score    INTEGER,
+    verdict          TEXT,
+    key_miss         TEXT,
+    next_time        TEXT,
+    wins             JSONB,
+    coaching_summary TEXT,
+    dimensions       JSONB,
+    raw_response     JSONB,
+    error            TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_call_scores_scored   ON call_scores(scored_at DESC);
+CREATE INDEX IF NOT EXISTS ix_call_scores_score    ON call_scores(overall_score);
 """
 
 

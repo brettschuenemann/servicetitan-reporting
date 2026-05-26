@@ -1,0 +1,43 @@
+name: Score recorded calls
+
+# Nightly call-coaching pipeline. Finds calls in the last 14 days with a
+# recording but no score, downloads the MP3 from ServiceTitan, transcribes
+# via OpenAI Whisper, and scores via Claude Sonnet 4.5 against an
+# inbound/outbound rubric. Persists to `call_scores`.
+#
+# Idempotent: a call with an existing row (success or error) is skipped.
+# Bounded at SCORE_CALLS_LIMIT (default 50) so cost can't run away.
+# Each call is ~$0.013 all-in; a full 50-call batch caps at ~$0.65.
+on:
+  schedule:
+    # 08:00 UTC = 3 AM Chicago — off-hours, fresh for the morning review
+    - cron: '0 8 * * *'
+  workflow_dispatch:   # allow manual triggers + cron-job.org backup
+
+jobs:
+  score:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run call scoring
+        env:
+          ST_APP_KEY: ${{ secrets.ST_APP_KEY }}
+          ST_TENANT_ID: ${{ secrets.ST_TENANT_ID }}
+          ST_CLIENT_ID: ${{ secrets.ST_CLIENT_ID }}
+          ST_CLIENT_SECRET: ${{ secrets.ST_CLIENT_SECRET }}
+          ST_ENVIRONMENT: ${{ secrets.ST_ENVIRONMENT }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          SCORE_CALLS_LIMIT: '50'
+        run: python scripts/score_calls.py
