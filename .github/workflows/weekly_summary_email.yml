@@ -10,7 +10,11 @@ on:
     # 22:00 UTC = 5 PM CDT (most of year) / 4 PM CST (Nov–Mar).
     - cron: '0 22 * * 5'   # Fri 5 PM CDT (primary)
     - cron: '0 23 * * 5'   # Fri 6 PM CDT (retry)
-  workflow_dispatch:   # manual "Run workflow" from the Actions tab
+  # workflow_dispatch INTENTIONALLY OMITTED. The AI summary should only
+  # regenerate on the scheduled cadence. If you need a one-off manual
+  # rebuild (e.g. catching up after a multi-week outage), set
+  # WEEKLY_SUMMARY_FORCE=1 and run scripts/send_weekly_summary_email.py
+  # locally — that's the only sanctioned override path.
 
 jobs:
   send:
