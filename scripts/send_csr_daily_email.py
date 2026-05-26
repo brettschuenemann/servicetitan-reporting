@@ -406,7 +406,7 @@ CALL_SCRIPTS = {
         ("Listen first", "Don't go straight to a sale. Let them talk about the system, the weather, whatever. The reconnect matters more than the pitch."),
         ("Soft offer", "\"We're about to head into [cooling/heating] season — most of our regulars are getting a tune-up about now to catch anything before it turns into a breakdown. Want to get on the calendar?\""),
         ("Plumbing FYI", "\"And while I have you — one thing that's new since we last talked: we now do full-service plumbing too. So next time you've got a leaky faucet, a slow drain, or the water heater's getting up there in age, give us a call instead of hunting for a plumber. Same team, same standards.\""),
-        ("If \"not right now\"", "\"No problem at all. Mind if I send a text in a couple of months as a reminder? You know where to find us — HVAC or plumbing — anytime something comes up.\""),
+        ("If \"not right now\"", "\"No problem at all. Mind if I send a reminder in a couple of months? You know where to find us — HVAC or plumbing — anytime something comes up.\""),
     ],
 }
 
