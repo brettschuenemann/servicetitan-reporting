@@ -1,0 +1,47 @@
+name: Hourly ServiceTitan sync
+
+# Keeps the dashboard fresh between the email-trigger syncs (8 AM + 5 PM ET).
+# Combined with the email crons, this gives hourly coverage during the
+# business day (8 AM – 5 PM ET, M-F).
+#
+# Like the email workflows, we pair the GitHub-native cron with a
+# cron-job.org backup since GitHub's free-tier scheduler is best-effort.
+# See `scripts/run_sync.py` for what gets synced.
+on:
+  schedule:
+    # 14:00 – 21:00 UTC weekdays = 9 AM – 4 PM ET (CDT, most of year)
+    # Morning 8 AM + evening 5 PM are already covered by the email crons.
+    - cron: '0 14 * * 1-5'
+    - cron: '0 15 * * 1-5'
+    - cron: '0 16 * * 1-5'
+    - cron: '0 17 * * 1-5'
+    - cron: '0 18 * * 1-5'
+    - cron: '0 19 * * 1-5'
+    - cron: '0 20 * * 1-5'
+    - cron: '0 21 * * 1-5'
+  workflow_dispatch:   # allow cron-job.org and manual triggers
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run sync
+        env:
+          ST_APP_KEY: ${{ secrets.ST_APP_KEY }}
+          ST_TENANT_ID: ${{ secrets.ST_TENANT_ID }}
+          ST_CLIENT_ID: ${{ secrets.ST_CLIENT_ID }}
+          ST_CLIENT_SECRET: ${{ secrets.ST_CLIENT_SECRET }}
+          ST_ENVIRONMENT: ${{ secrets.ST_ENVIRONMENT }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python scripts/run_sync.py
