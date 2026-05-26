@@ -395,7 +395,7 @@ CALL_SCRIPTS = {
     ],
     "membership": [
         ("Opener", "\"Hi [name], this is Fey at Pure Comfort — just checking in on your new system from [install date]. How's it running for you?\""),
-        ("Pivot", "\"The reason I called: most manufacturers require an annual tune-up to keep your warranty valid. A lot of our install customers join our maintenance plan so we handle it automatically — covers two tune-ups a year, priority scheduling, and 10% off any services.\""),
+        ("Pivot", "\"The reason I called: most manufacturers require an annual tune-up to keep your warranty valid. A lot of our install customers join our maintenance plan so we handle it automatically — covers three tune-ups a year (two HVAC and one plumbing), priority scheduling, and 10% off any services.\""),
         ("Special offer", "\"And because you just installed, I can get you 50% off your first year. That makes it a no-brainer — and after that you can keep it or cancel anytime.\""),
         ("Close", "\"Want me to lock that in today, or text you the details to look over first?\""),
         ("If \"too expensive\"", "\"At 50% off the first year, it pays for itself the first time anything goes wrong — and it keeps your warranty in force, which is usually the bigger number.\""),
