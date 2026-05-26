@@ -206,12 +206,18 @@ def _get_openers_with_cache(customer_inputs: list[dict]) -> dict[int, str]:
 
     # 3. Persist new openers (composite-key upsert)
     if new_openers_by_cid:
-        rows = []
+        # Dedupe by composite key — same as the sync pre-warmer.
+        # Two missed-call rows for the same customer share ("missed", cid, 0);
+        # ON CONFLICT raises CardinalityViolation if both are in one INSERT.
+        rows: list[tuple] = []
+        seen: set[tuple] = set()
         for c, k in zip(customer_inputs, keys):
-            if k and k not in db_openers:
-                cid = k[1]
-                if cid in new_openers_by_cid:
-                    rows.append((k[0], k[1], k[2], new_openers_by_cid[cid]))
+            if not (k and k not in db_openers and k not in seen):
+                continue
+            cid = k[1]
+            if cid in new_openers_by_cid:
+                rows.append((k[0], k[1], k[2], new_openers_by_cid[cid]))
+                seen.add(k)
         if rows:
             from psycopg2.extras import execute_values
             with db() as conn, conn.cursor() as cur:

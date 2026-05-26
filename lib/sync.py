@@ -761,6 +761,7 @@ def sync_for_email(
         ("appointment_assignments", sync_appointment_assignments),
         ("memberships", sync_memberships),
         ("call_list_contacts", sync_call_list_contacts),
+        ("call_list_openers", sync_call_list_openers),
     ]
     for name, fn in steps:
         try:
@@ -857,6 +858,194 @@ def sync_call_list_contacts(
         )
     conn.commit()
     return {"fetched": len(fetched), "candidates": len(to_fetch)}
+
+
+def sync_call_list_openers(
+    client: ServiceTitanClient,
+    conn: psycopg2.extensions.connection,
+    progress: ProgressCallback = _noop,
+) -> dict:
+    """Pre-generate openers for every Call List candidate not already cached.
+
+    The page reads openers from `csr_openers`; without this step, the first
+    page load that includes a never-before-seen customer fires a Claude
+    call (3-5s). Pre-warming here means cold loads stay near-instant.
+
+    Cost discipline:
+      - We only generate for (kind, customer_id, secondary_id) tuples
+        NOT already in csr_openers. After the initial backfill, daily
+        incremental cost is ~5-15 new openers × $0.003 = ~$0.05/day.
+      - Buffer of 2× SECTION_CAPS per section so the "next up" rows that
+        will bubble in as Fey marks the current ones are also ready.
+
+    Returns {generated: N, candidates: N, skipped_cached: N}.
+    """
+    # Lazy imports — avoids circular dependencies and keeps lib/ light
+    from datetime import date
+    from scripts.send_csr_daily_email import (
+        load_membership_opps, load_sleeping_customers,
+        load_missed_calls, load_open_estimates,
+        SECTION_CAPS, dedup_key, load_recommendation_state,
+        to_central,
+    )
+    from lib.call_openers import generate_openers
+
+    progress("Loading Call List candidate rows…")
+    state = load_recommendation_state(conn)
+    suppress = state["suppress"]
+
+    memberships = [r for r in load_membership_opps(conn)
+                   if dedup_key("membership", r.get("customer_id"))
+                      not in suppress["membership"]][:SECTION_CAPS["membership"] * 2]
+    sleeping = [r for r in load_sleeping_customers(conn, limit=SECTION_CAPS["sleeping"] * 4)
+                if dedup_key("sleeping", r.get("customer_id"))
+                   not in suppress["sleeping"]][:SECTION_CAPS["sleeping"] * 2]
+    missed = [r for r in load_missed_calls(conn)
+              if dedup_key("missed", r.get("customer_id"), r.get("id"))
+                 not in suppress["missed"]][:SECTION_CAPS["missed"] * 2]
+    estimates = [r for r in load_open_estimates(conn, min_age_days=30)
+                 if dedup_key("estimate", r.get("customer_id"), r.get("id"))
+                    not in suppress["estimate"]][:SECTION_CAPS["estimate"] * 2]
+
+    today_d = date.today()
+    inputs: list[dict] = []
+    keys: list[tuple[str, int, int]] = []
+
+    # Same opener-input shape the page builds — keep these in sync.
+    for r in memberships:
+        cid = r.get("customer_id")
+        if not cid: continue
+        install_date = r.get("install_date")
+        inputs.append({
+            "customer_id": cid,
+            "customer_name": r.get("customer_name"),
+            "kind": "membership",
+            "equipment": r.get("equipment"),
+            "install_summary": r.get("install_summary"),
+            "install_days_ago": (today_d - install_date).days if install_date else None,
+            "install_value": float(r.get("install_value") or 0),
+            "lifetime_revenue": float(r.get("lifetime_revenue") or 0),
+            "lifetime_invoices": int(r.get("lifetime_invoices") or 0),
+            "first_visit_year": r["first_visit"].year if r.get("first_visit") else None,
+        })
+        keys.append(("membership", int(cid), 0))
+
+    for r in sleeping:
+        cid = r.get("customer_id")
+        if not cid: continue
+        last_visit = r.get("last_visit")
+        inputs.append({
+            "customer_id": cid,
+            "customer_name": r.get("customer_name"),
+            "kind": "sleeping",
+            "last_visit_days_ago": (today_d - last_visit).days if last_visit else None,
+            "last_summary": r.get("last_summary"),
+            "last_items": r.get("last_items"),
+            "loyal_revenue": float(r.get("loyal_revenue") or 0),
+            "loyal_invoices": int(r.get("loyal_invoices") or 0),
+        })
+        keys.append(("sleeping", int(cid), 0))
+
+    for r in missed:
+        cid = r.get("customer_id")
+        if not cid: continue
+        received = r.get("received_on")
+        last_visit = r.get("last_visit")
+        inputs.append({
+            "customer_id": cid,
+            "customer_name": r.get("customer_name") or "Unknown",
+            "kind": "missed",
+            "call_type": r.get("call_type"),
+            "call_when": to_central(received).strftime("%a %I:%M %p") if received else "earlier",
+            "lifetime_revenue": float(r.get("lifetime_revenue") or 0),
+            "lifetime_invoices": int(r.get("lifetime_invoices") or 0),
+            "last_visit_days_ago": (today_d - last_visit).days if last_visit else None,
+            "last_invoice_summary": r.get("last_invoice_summary"),
+        })
+        keys.append(("missed", int(cid), 0))
+
+    for r in estimates:
+        cid = r.get("customer_id")
+        if not cid: continue
+        inputs.append({
+            "customer_id": cid,
+            "customer_name": r.get("customer_name"),
+            "kind": "estimate",
+            "estimate_name": r.get("estimate_name"),
+            "summary": r.get("summary"),
+            "subtotal": float(r.get("subtotal") or 0),
+            "age_days": int(r.get("age_days") or 0),
+            "originating_tech": r.get("originating_tech"),
+            "business_unit_name": r.get("business_unit_name"),
+            "lifetime_revenue": float(r.get("lifetime_revenue") or 0),
+            "lifetime_invoices": int(r.get("lifetime_invoices") or 0),
+            "estimate_id": int(r.get("id") or 0),
+        })
+        keys.append(("estimate", int(cid), int(r.get("id") or 0)))
+
+    if not keys:
+        return {"generated": 0, "candidates": 0, "skipped_cached": 0}
+
+    # Skip composite keys that already have a row
+    with conn.cursor() as cur:
+        placeholders = ",".join(["(%s,%s,%s)"] * len(keys))
+        params = [v for t in keys for v in t]
+        cur.execute(
+            f"SELECT kind, customer_id, secondary_id FROM csr_openers "
+            f"WHERE (kind, customer_id, secondary_id) IN ({placeholders})",
+            params,
+        )
+        cached = {(r["kind"], int(r["customer_id"]), int(r["secondary_id"]))
+                  for r in cur.fetchall()}
+
+    to_generate = [(inp, k) for inp, k in zip(inputs, keys) if k not in cached]
+    if not to_generate:
+        progress(f"All {len(keys)} openers already cached — nothing to do.")
+        return {"generated": 0, "candidates": len(keys), "skipped_cached": len(keys)}
+
+    # Sanity cap so a misconfiguration can't burn through Claude tokens.
+    # 200 new openers per run = ~$0.60; way above the realistic incremental
+    # rate (5-15/day), well below a runaway cost.
+    HARD_CAP = 200
+    if len(to_generate) > HARD_CAP:
+        progress(f"WARNING capping at {HARD_CAP} (would have generated {len(to_generate)})")
+        to_generate = to_generate[:HARD_CAP]
+
+    progress(f"Generating {len(to_generate)} new openers via Claude…")
+    new_openers = generate_openers([inp for inp, _ in to_generate])
+
+    # Dedupe by composite key — multiple inputs can share a key
+    # (e.g. two missed calls from the same customer both map to
+    # ("missed", cid, 0)). Without this, ON CONFLICT raises
+    # CardinalityViolation since the same key appears twice in one INSERT.
+    rows: list[tuple] = []
+    seen: set[tuple] = set()
+    for inp, key in to_generate:
+        if key in seen:
+            continue
+        opener = new_openers.get(key[1])  # generate_openers returns dict[cid]
+        if opener:
+            rows.append((key[0], key[1], key[2], opener))
+            seen.add(key)
+
+    if rows:
+        progress(f"Persisting {len(rows)} openers…")
+        with conn.cursor() as cur:
+            execute_values(
+                cur,
+                "INSERT INTO csr_openers "
+                "  (kind, customer_id, secondary_id, opener) VALUES %s "
+                "ON CONFLICT (kind, customer_id, secondary_id) DO UPDATE SET "
+                "  opener = EXCLUDED.opener, generated_at = NOW()",
+                rows,
+            )
+        conn.commit()
+
+    return {
+        "generated": len(rows),
+        "candidates": len(keys),
+        "skipped_cached": len(cached),
+    }
 
 
 def sync_all(
