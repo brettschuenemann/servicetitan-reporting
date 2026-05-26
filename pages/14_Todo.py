@@ -3,9 +3,9 @@
 Two stacked sections:
   1. "This week" — checkable action items parsed from the latest AI summary's
      "Do This Week" block. Checks persist in `ai_summary_todos`.
-  2. "Estimate workspace" — open estimates ≤30 days old, organized as a
-     drag-and-drop kanban (To do / Working / Done) plus a detailed list
-     view with action buttons + notes.
+  2. "Details + specific outcomes" — open estimates ≤30 days old, shown as
+     interactive cards with filter/search, action buttons (Sold / Working /
+     Declined / VM / Try later / Wrong #), and inline notes per estimate.
 
 Admin-only (require_password). Jake's actual interactive use will need a
 real Jake login eventually, but for v1 this lives behind the admin gate
@@ -20,7 +20,6 @@ from datetime import date, datetime, timezone
 from html import escape
 
 import streamlit as st
-from streamlit_sortables import sort_items
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -31,7 +30,6 @@ from lib.csr_outcomes import (
     load_notes_bulk,
     record_outcome,
     save_note,
-    undo_outcome,
 )
 from lib.database import db
 from lib.style import apply_mobile_styles, empty_state
@@ -304,119 +302,6 @@ k2.metric("⚙️ Working", len(by_bucket["working"]))
 k3.metric("💰 Pipeline", f"${total_pipeline:,.0f}",
           help="Open value across To do + Working")
 k4.metric("✅ Done today", len(by_bucket["done_today"]))
-
-st.divider()
-
-# ---------- drag-and-drop kanban ----------
-
-st.markdown("### 📋 Workspace")
-st.caption("Drag cards between columns to update status. "
-           "Drop on **Done** = marked Sold. Use the detailed list below for "
-           "specific outcomes (declined, voicemail, etc.) and inline notes.")
-
-# Build card-text → estimate lookup
-def _card_text(e: dict) -> str:
-    """Compact text rendered inside each draggable card."""
-    name = (e.get("customer_name") or "Unknown")[:30]
-    value = float(e.get("subtotal") or 0)
-    age = int(e.get("age_days") or 0)
-    return f"#{e['id']} · {name} · ${value:,.0f} · {age}d"
-
-
-card_to_estimate: dict[str, dict] = {}
-column_lists: dict[str, list[str]] = {"📥 To do": [], "⚙️ Working": [], "✅ Done today": []}
-
-for e in by_bucket["todo"]:
-    txt = _card_text(e)
-    card_to_estimate[txt] = e
-    column_lists["📥 To do"].append(txt)
-for e in by_bucket["working"]:
-    txt = _card_text(e)
-    card_to_estimate[txt] = e
-    column_lists["⚙️ Working"].append(txt)
-for e in by_bucket["done_today"]:
-    txt = _card_text(e)
-    card_to_estimate[txt] = e
-    column_lists["✅ Done today"].append(txt)
-
-# Show the kanban
-if not card_to_estimate:
-    empty_state("No open estimates in the last 30 days. Nice work!")
-else:
-    sortable_input = [
-        {"header": col, "items": items} for col, items in column_lists.items()
-    ]
-    sorted_result = sort_items(sortable_input, multi_containers=True, key="jake_kanban")
-
-    # Detect moves between columns and record outcomes
-    if sorted_result and isinstance(sorted_result, list):
-        column_to_outcome = {
-            "📥 To do": None,        # back to no-action — needs Undo
-            "⚙️ Working": "working",
-            "✅ Done today": "sold",  # default — Jake can refine via list buttons
-        }
-        for col in sorted_result:
-            header = col.get("header") or ""
-            new_outcome = column_to_outcome.get(header)
-            for card_text in col.get("items", []):
-                est = card_to_estimate.get(card_text)
-                if not est:
-                    continue
-                old_bucket = est["_bucket"]
-                new_bucket = {
-                    "📥 To do": "todo",
-                    "⚙️ Working": "working",
-                    "✅ Done today": "done_today",
-                }.get(header)
-                if old_bucket == new_bucket:
-                    continue
-
-                # Detect dragged-back-to-To-Do: undo most-recent outcome
-                if new_bucket == "todo":
-                    key = dedup_key("estimate", est.get("customer_id"), est.get("id"))
-                    info = latest_outcomes.get(key)
-                    if info:
-                        # Look up the underlying id so we can undo it
-                        with db() as conn, conn.cursor() as cur:
-                            cur.execute(
-                                "SELECT id FROM csr_customer_outcomes "
-                                "WHERE dedup_key = %s ORDER BY recorded_at DESC LIMIT 1",
-                                (key,),
-                            )
-                            row = cur.fetchone()
-                            if row:
-                                undo_outcome(conn, int(row["id"]))
-                        _queue_toast(
-                            f"Moved **{est.get('customer_name')}** back to To do.",
-                            icon="↩️",
-                        )
-                elif new_outcome:
-                    try:
-                        with db() as conn:
-                            record_outcome(
-                                conn, "estimate",
-                                est.get("customer_id"), est.get("id"),
-                                new_outcome,
-                            )
-                        _queue_toast(
-                            f"**{est.get('customer_name')}** → "
-                            f"{OUTCOME_CONFIG['estimate'][new_outcome]['label']}",
-                            icon="✅",
-                        )
-                    except Exception as exc:
-                        st.session_state["todo_error"] = str(exc)
-
-        # If any moves happened, refresh
-        any_move = any(
-            card_to_estimate[t]["_bucket"] != {
-                "📥 To do": "todo", "⚙️ Working": "working", "✅ Done today": "done_today"
-            }.get(col.get("header"))
-            for col in sorted_result for t in col.get("items", [])
-            if t in card_to_estimate
-        )
-        if any_move:
-            _load_todo_data.clear()
-            st.rerun()
 
 st.divider()
 
