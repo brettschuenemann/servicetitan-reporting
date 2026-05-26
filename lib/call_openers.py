@@ -384,6 +384,32 @@ def _format_customer(c: dict) -> str:
         else:
             lines.append("  new caller — no prior history with us")
 
+    elif kind == "estimate":
+        name_of_est = (c.get("estimate_name") or "").strip()
+        summary = (c.get("summary") or "").strip()
+        age = c.get("age_days")
+        value = c.get("subtotal", 0)
+        tech = (c.get("originating_tech") or "").strip()
+        bu = (c.get("business_unit_name") or "").strip()
+        ltv = c.get("lifetime_revenue", 0)
+        visits = c.get("lifetime_invoices", 0)
+        if name_of_est:
+            lines.append(f"  estimate: {name_of_est[:160]}")
+        if summary and summary != name_of_est:
+            lines.append(f"  estimate notes (for context): {summary[:200]}")
+        if value:
+            lines.append(f"  value: ${value:,.0f}")
+        if age is not None:
+            lines.append(f"  quote age: {age} days old")
+        if tech:
+            lines.append(f"  originating tech (reference by name): {tech}")
+        elif bu:
+            lines.append(f"  originating business unit: {bu}")
+        if visits:
+            lines.append(f"  existing customer — ${ltv:,.0f} across {visits} prior visits")
+        else:
+            lines.append("  no prior paid visits — this estimate is their first interaction")
+
     return "\n".join(lines)
 
 

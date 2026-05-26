@@ -40,6 +40,16 @@ OUTCOME_CONFIG: dict[str, dict[str, dict]] = {
         "try_later":    {"label": "Try later",    "expires_days": 7,    "color": "#F59E0B"},
         "wrong_number": {"label": "Wrong number", "expires_days": None, "color": "#6B7280"},
     },
+    # Aging open estimates (>30 days). Jake handles the fresh ones; Fey
+    # works the stale tail. A customer can have multiple open estimates,
+    # so dedup is per-estimate (estimate_id passed via the call_id slot).
+    "estimate": {
+        "sold":         {"label": "Sold",           "expires_days": None, "color": "#10B981"},
+        "declined":     {"label": "Declined",       "expires_days": 180,  "color": "#EF4444"},
+        "voicemail":    {"label": "No answer / VM", "expires_days": 4,    "color": "#F59E0B"},
+        "try_later":    {"label": "Try later",      "expires_days": 14,   "color": "#F59E0B"},
+        "wrong_number": {"label": "Wrong number",   "expires_days": None, "color": "#6B7280"},
+    },
 }
 
 
@@ -47,11 +57,16 @@ def dedup_key(kind: str, customer_id: int | None, call_id: int | None = None) ->
     """Stable key for de-duping recommendations / outcomes across days.
 
     Must match the implementation in scripts/send_csr_daily_email.py.
-    Missed calls dedup per-call so multiple missed calls from the same
-    customer count separately.
+    The `call_id` parameter doubles as a generic "secondary id":
+      - For missed calls it's the call_id (multiple missed calls from
+        the same customer count separately).
+      - For estimates it's the estimate_id (a customer can have several
+        open quotes, each tracked independently).
     """
     if kind == "missed" and call_id is not None:
         return f"{kind}:call:{call_id}"
+    if kind == "estimate" and call_id is not None:
+        return f"{kind}:est:{call_id}"
     return f"{kind}:cust:{customer_id}"
 
 

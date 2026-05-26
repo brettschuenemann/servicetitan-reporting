@@ -41,6 +41,7 @@ from scripts.send_csr_daily_email import (
     fmt_phone,
     load_membership_opps,
     load_missed_calls,
+    load_open_estimates,
     load_recommendation_state,
     load_sleeping_customers,
     lookup_contact,
@@ -64,17 +65,22 @@ st.session_state.setdefault("call_list_search", "")
 
 @st.cache_data(ttl=300, show_spinner="Loading call list…")
 def _load_sections() -> dict:
-    """Pull all three sections + recommendation/outreach state."""
+    """Pull all four sections + recommendation/outreach state."""
     with db() as conn:
         state = load_recommendation_state(conn)
         memberships_all = load_membership_opps(conn)
         sleeping_all = load_sleeping_customers(conn, limit=SECTION_CAPS["sleeping"] * 4)
         missed_all = load_missed_calls(conn)
+        # 30d+ aging estimates — Jake handles the fresh ones, these are Fey's.
+        # Pull 4× the cap so suppressed/in-cooldown ones still leave a healthy
+        # bench when she clears the visible list.
+        estimates_all = load_open_estimates(conn, min_age_days=30)
     return {
         "state": state,
         "memberships_all": memberships_all,
         "sleeping_all": sleeping_all,
         "missed_all": missed_all,
+        "estimates_all": estimates_all,
     }
 
 
@@ -206,6 +212,19 @@ def _personalize_script_line(line: str, row: dict, kind: str) -> str:
             line = line.replace("[last service]", short_summary)
         else:
             line = line.replace("[last service]", "your last visit")
+    elif kind == "estimate":
+        # [tech], [estimate date], [estimate name], [estimate value]
+        tech = (row.get("originating_tech") or "").strip()
+        line = line.replace("[tech]", tech if tech else "our team")
+        created = row.get("created_on")
+        if created:
+            line = line.replace("[estimate date]", created.strftime("%B %-d"))
+        else:
+            line = line.replace("[estimate date]", "earlier this season")
+        ename = (row.get("estimate_name") or "").strip()
+        line = line.replace("[estimate name]", ename if ename else "the work we proposed")
+        value = float(row.get("subtotal") or 0)
+        line = line.replace("[estimate value]", f"${value:,.0f}" if value else "the quoted amount")
 
     return line
 
@@ -219,11 +238,11 @@ def _row_passes_filter(row: dict, kind: str, outreach: dict | None) -> bool:
     elif f == "Untouched only":
         if outreach and (outreach.get("attempts", 0) > 0 or outreach.get("called_back_at")):
             return False
-    elif f in ("Missed calls", "Memberships", "Sleeping"):
+    elif f in ("Missed calls", "Memberships", "Sleeping", "Estimates"):
         # Section filter applied at the section render level — always pass
         # when filtering by kind matches; otherwise this row is hidden.
         target_kind = {"Missed calls": "missed", "Memberships": "membership",
-                       "Sleeping": "sleeping"}[f]
+                       "Sleeping": "sleeping", "Estimates": "estimate"}[f]
         if kind != target_kind:
             return False
 
@@ -312,6 +331,7 @@ outreach_map = state["outreach"]
 memberships_all = data["memberships_all"]
 sleeping_all = data["sleeping_all"]
 missed_all = data["missed_all"]
+estimates_all = data["estimates_all"]
 
 # Apply suppression
 memberships = [r for r in memberships_all
@@ -320,11 +340,14 @@ sleeping = [r for r in sleeping_all
             if dedup_key("sleeping", r.get("customer_id")) not in suppress["sleeping"]]
 missed = [r for r in missed_all
           if dedup_key("missed", r.get("customer_id"), r.get("id")) not in suppress["missed"]]
+estimates = [r for r in estimates_all
+             if dedup_key("estimate", r.get("customer_id"), r.get("id")) not in suppress["estimate"]]
 
 # Cap
 memberships_visible = memberships[:SECTION_CAPS["membership"]]
 sleeping_visible = sleeping[:SECTION_CAPS["sleeping"]]
 missed_visible = missed[:SECTION_CAPS["missed"]]
+estimates_visible = estimates[:SECTION_CAPS["estimate"]]
 
 # Today's outcomes
 with db() as _conn:
@@ -332,10 +355,11 @@ with db() as _conn:
 
 # Hot leads count (customers who called us back since their last rec)
 hot_count = sum(
-    1 for c in (memberships_visible + sleeping_visible + missed_visible)
+    1 for c in (memberships_visible + sleeping_visible + missed_visible + estimates_visible)
     if (outreach_map.get(c.get("customer_id")) or {}).get("called_back_at")
 )
-to_call_count = len(memberships_visible) + len(sleeping_visible) + len(missed_visible)
+to_call_count = (len(memberships_visible) + len(sleeping_visible)
+                 + len(missed_visible) + len(estimates_visible))
 
 # ---------- KPI strip ----------
 k1, k2, k3, k4 = st.columns(4)
@@ -355,13 +379,12 @@ st.divider()
 # ---------- filter + search row ----------
 fc1, fc2 = st.columns([2, 3])
 with fc1:
+    _filter_options = ["All", "Hot leads only", "Untouched only",
+                       "Missed calls", "Memberships", "Sleeping", "Estimates"]
     st.session_state["call_list_filter"] = st.selectbox(
         "Filter",
-        ["All", "Hot leads only", "Untouched only",
-         "Missed calls", "Memberships", "Sleeping"],
-        index=["All", "Hot leads only", "Untouched only",
-               "Missed calls", "Memberships", "Sleeping"].index(
-            st.session_state["call_list_filter"]),
+        _filter_options,
+        index=_filter_options.index(st.session_state["call_list_filter"]),
         label_visibility="collapsed",
     )
 with fc2:
@@ -376,10 +399,11 @@ with fc2:
 
 # Build opener input dicts + look up phones/emails for everything we'll show
 today_d = date.today()
-all_visible = list(memberships_visible) + list(sleeping_visible) + list(missed_visible)
+all_visible = (list(memberships_visible) + list(sleeping_visible)
+               + list(missed_visible) + list(estimates_visible))
 
 # Phone/email enrichment per customer (cached)
-for r in memberships_visible + sleeping_visible:
+for r in memberships_visible + sleeping_visible + estimates_visible:
     cid = r.get("customer_id")
     if cid:
         r["phone"], r["email"] = _lookup_contact_cached(int(cid))
@@ -434,6 +458,20 @@ for r in missed_visible:
         "lifetime_invoices": int(r.get("lifetime_invoices") or 0),
         "last_visit_days_ago": (today_d - last_visit).days if last_visit else None,
         "last_invoice_summary": r.get("last_invoice_summary"),
+    })
+for r in estimates_visible:
+    opener_inputs.append({
+        "customer_id": r.get("customer_id"),
+        "customer_name": r.get("customer_name"),
+        "kind": "estimate",
+        "estimate_name": r.get("estimate_name"),
+        "summary": r.get("summary"),
+        "subtotal": float(r.get("subtotal") or 0),
+        "age_days": int(r.get("age_days") or 0),
+        "originating_tech": r.get("originating_tech"),
+        "business_unit_name": r.get("business_unit_name"),
+        "lifetime_revenue": float(r.get("lifetime_revenue") or 0),
+        "lifetime_invoices": int(r.get("lifetime_invoices") or 0),
     })
 
 opener_map = _get_openers_with_cache(opener_inputs)
@@ -495,6 +533,19 @@ def render_row(r: dict, kind: str, call_id: int | None = None):
             f"{received_local:%-I:%M %p} on {received_local:%a %b %d}"
             + (f" · CSR: {escape(r['agent_name'])}" if r.get('agent_name') else "")
         )
+    elif kind == "estimate":
+        created = r.get("created_on")
+        age = int(r.get("age_days") or 0)
+        value = float(r.get("subtotal") or 0)
+        tech = (r.get("originating_tech") or "").strip()
+        ename = (r.get("estimate_name") or "").strip()
+        primary = (
+            f"<b>{fmt_money(value)}</b> estimate"
+            + (f" — <i>{escape(short(ename, 60))}</i>" if ename else "")
+            + (f" · sent {created:%b %d}" if created else "")
+            + f" · <b>{age}d old</b>"
+            + (f" · tech: {escape(tech)}" if tech else "")
+        )
 
     # History line
     if kind == "membership":
@@ -515,6 +566,14 @@ def render_row(r: dict, kind: str, call_id: int | None = None):
             )
         else:
             history = "New caller — no prior history"
+    elif kind == "estimate":
+        if int(r.get("lifetime_invoices") or 0) > 0:
+            history = (
+                f"Existing customer · lifetime {fmt_money(r.get('lifetime_revenue'))} "
+                f"across {int(r.get('lifetime_invoices') or 0)} visits"
+            )
+        else:
+            history = "First-time prospect — this estimate is their only interaction"
     else:
         history = ""
 
@@ -616,9 +675,11 @@ def render_row(r: dict, kind: str, call_id: int | None = None):
 
 # ---------- sections ----------
 
-# Order: missed first (most time-sensitive), then membership, then sleeping
+# Order: missed first (most time-sensitive), then aging estimates (warm $$),
+# then memberships, then sleeping.
 section_specs = [
     ("missed", "📞 Missed calls", "#F34039", missed_visible),
+    ("estimate", "📋 Aging estimates (30d+)", "#8B5CF6", estimates_visible),
     ("membership", "🤝 Membership opportunities", "#0066EE", memberships_visible),
     ("sleeping", "💤 Sleeping customers", "#F2A93B", sleeping_visible),
 ]
@@ -628,7 +689,8 @@ visible_kinds = {
     "Missed calls": {"missed"},
     "Memberships": {"membership"},
     "Sleeping": {"sleeping"},
-}.get(current_filter, {"missed", "membership", "sleeping"})
+    "Estimates": {"estimate"},
+}.get(current_filter, {"missed", "membership", "sleeping", "estimate"})
 
 for kind, label, color, rows in section_specs:
     if kind not in visible_kinds:
@@ -666,7 +728,11 @@ for kind, label, color, rows in section_specs:
             # The call script now lives per-row (personalized) right next
             # to each customer's data, so no section-level header needed.
             for r in filtered_rows:
-                render_row(r, kind, call_id=r.get("id") if kind == "missed" else None)
+                # For missed calls the secondary id is the call_id; for
+                # estimates it's the estimate_id (so a customer with two
+                # open quotes can be tracked independently).
+                secondary_id = r.get("id") if kind in ("missed", "estimate") else None
+                render_row(r, kind, call_id=secondary_id)
 
 # ---------- completed today (with undo) ----------
 st.divider()

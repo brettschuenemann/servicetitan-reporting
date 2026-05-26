@@ -318,6 +318,66 @@ def load_sleeping_customers(conn, limit: int = 15) -> list[dict]:
         return [dict(r) for r in cur.fetchall()]
 
 
+def load_open_estimates(conn, min_age_days: int = 30,
+                        min_value: float = 0) -> list[dict]:
+    """Open estimates older than `min_age_days` (Jake handles the fresh ones).
+
+    Sorted by subtotal DESC then age DESC — biggest dollar opportunities
+    first, with the oldest as the tiebreaker. We pull the originating
+    tech name from appointment_assignments where available so Fey can
+    reference it ("the tech who came out, John, mentioned…").
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH first_tech AS (
+              SELECT DISTINCT ON (aa.job_id)
+                aa.job_id,
+                aa.technician_name
+              FROM appointment_assignments aa
+              WHERE aa.technician_name IS NOT NULL
+                AND aa.technician_name <> 'Imported Default Technician'
+              ORDER BY aa.job_id, aa.assigned_on
+            ),
+            history AS (
+              SELECT customer_id, COUNT(*) AS invoices,
+                     SUM(total) AS lifetime_revenue
+              FROM invoices
+              WHERE customer_id IS NOT NULL AND total > 0
+              GROUP BY customer_id
+            )
+            SELECT
+              e.id,
+              e.name        AS estimate_name,
+              e.summary,
+              e.subtotal,
+              e.created_on,
+              e.business_unit_name,
+              e.customer_id,
+              COALESCE(
+                (SELECT MIN(customer_name) FROM invoices
+                 WHERE customer_id = e.customer_id AND customer_name IS NOT NULL),
+                'Customer ' || e.customer_id::text
+              ) AS customer_name,
+              EXTRACT(DAY FROM (NOW() - e.created_on))::int AS age_days,
+              ft.technician_name AS originating_tech,
+              h.invoices AS lifetime_invoices,
+              h.lifetime_revenue
+            FROM estimates e
+            LEFT JOIN first_tech ft ON ft.job_id = e.job_id
+            LEFT JOIN history h    ON h.customer_id = e.customer_id
+            WHERE e.status_name = 'Open'
+              AND e.active = TRUE
+              AND e.created_on < NOW() - (%s || ' days')::interval
+              AND e.subtotal  >= %s
+              AND e.customer_id IS NOT NULL
+            ORDER BY e.subtotal DESC, e.created_on ASC
+            """,
+            (min_age_days, min_value),
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
 def load_missed_calls(conn) -> list[dict]:
     """Inbound abandoned + unbooked calls from the last 30 days.
 
@@ -381,6 +441,7 @@ CARD_STYLES = {
     "membership": ("#0066EE", "🤝 Membership opportunities", "Install customers in the last 180 days who haven't enrolled. They stay on this list every day until you call them, leave a voicemail, or they enroll."),
     "sleeping":   ("#F2A93B", "💤 Sleeping customers",      "High-value customers who've gone quiet. They already know us; a friendly call wins them back."),
     "missed":     ("#F34039", "📞 Missed calls — call back", "Inbound calls in the last 30 days that didn't book — and where the customer hasn't booked something since. They stay on this list daily until you call them or they book."),
+    "estimate":   ("#8B5CF6", "📋 Aging estimates (30d+)",   "Open estimates older than 30 days — Jake covers the fresh ones, these are yours. Sorted by value: biggest dollar opportunities first."),
 }
 
 # Quick call scripts shown at the top of each section. Keep them short —
@@ -407,6 +468,14 @@ CALL_SCRIPTS = {
         ("Soft offer", "\"We're about to head into [cooling/heating] season — most of our regulars are getting a tune-up about now to catch anything before it turns into a breakdown. Want to get on the calendar?\""),
         ("Plumbing FYI", "\"And while I have you — one thing that's new since we last talked: we now do full-service plumbing too. So next time you've got a leaky faucet, a slow drain, or the water heater's getting up there in age, give us a call instead of hunting for a plumber. Same team, same standards.\""),
         ("If \"not right now\"", "\"No problem at all. Mind if I send a reminder in a couple of months? You know where to find us — HVAC or plumbing — anytime something comes up.\""),
+    ],
+    "estimate": [
+        ("Opener", "\"Hi [name], this is Fey at Pure Comfort. I'm following up on the estimate [tech] put together for you on [estimate date] — [estimate name] for [estimate value]. Have you had a chance to look it over?\""),
+        ("Discover", "\"Anything specific holding things up, or just need a little more time to think it through?\" — listen; don't pitch yet."),
+        ("If \"still deciding\"", "\"Totally understand — it's a real decision. If you can lock it in this week we can usually pull your install forward. Want me to pencil you in?\""),
+        ("If \"too expensive\"", "\"I hear you. Want me to have someone walk through it with you again? Sometimes there's a smaller-scope option that gets you most of the way there for less.\""),
+        ("If \"chose someone else\"", "\"No problem — appreciate you letting me know. Mind if I ask what made the difference? Helps us stay sharp. And remember, we're here if anything changes.\""),
+        ("Close", "\"Want me to get you on the calendar this week? We can usually be out within a few days.\""),
     ],
 }
 
@@ -442,20 +511,23 @@ SUPPRESS_DAYS_FULL = {
     "membership": 14,
     "sleeping":   45,
     "missed":     7,
+    "estimate":   30,   # had a real convo about the quote — give them time to decide
 }
 SUPPRESS_DAYS_SHORT = {  # used when only voicemails/no-answers detected
     "membership": 4,
     "sleeping":   10,
     "missed":     2,
+    "estimate":   4,
 }
 
 # Hard caps per section so a backlog doesn't produce a 100-row email/page.
-# Same number across all three keeps Fey's daily workload predictable and
-# the page scannable in one viewport on mobile.
+# Same number across all keeps Fey's daily workload predictable and the
+# page scannable in one viewport on mobile.
 SECTION_CAPS = {
     "missed":     10,
     "membership": 10,
     "sleeping":   10,
+    "estimate":   10,
 }
 
 # Base URL for the Streamlit app (used to build outcome-action links in the
@@ -479,6 +551,13 @@ ACTION_LINKS: dict[str, list[tuple[str, str, str]]] = {
     ],
     "missed": [
         ("followed_up",  "✅ Followed up",   "#10B981"),
+        ("voicemail",    "📨 Voicemail",     "#F59E0B"),
+        ("try_later",    "🔁 Try later",     "#F59E0B"),
+        ("wrong_number", "📵 Wrong #",       "#6B7280"),
+    ],
+    "estimate": [
+        ("sold",         "✅ Sold",          "#10B981"),
+        ("declined",     "❌ Declined",      "#EF4444"),
         ("voicemail",    "📨 Voicemail",     "#F59E0B"),
         ("try_later",    "🔁 Try later",     "#F59E0B"),
         ("wrong_number", "📵 Wrong #",       "#6B7280"),
@@ -678,9 +757,16 @@ def load_recommendation_state(conn) -> dict:
 
 
 def dedup_key(kind: str, customer_id: int | None, call_id: int | None = None) -> str:
-    """Stable key for de-duping recommendations across days."""
+    """Stable key for de-duping recommendations across days.
+
+    Must stay in sync with lib/csr_outcomes.dedup_key — the third arg
+    doubles as a generic "secondary id": call_id for missed calls,
+    estimate_id for aging-estimates rows.
+    """
     if kind == "missed" and call_id is not None:
         return f"{kind}:call:{call_id}"
+    if kind == "estimate" and call_id is not None:
+        return f"{kind}:est:{call_id}"
     return f"{kind}:cust:{customer_id}"
 
 
@@ -855,7 +941,7 @@ def _render_notification_html(
     call_list_url: str,
 ) -> str:
     """Short HTML notification — counts, hot leads, prominent CTA to the live page."""
-    total = counts["missed"] + counts["membership"] + counts["sleeping"]
+    total = counts["missed"] + counts["membership"] + counts["sleeping"] + counts.get("estimate", 0)
 
     hot_html = ""
     if hot_leads:
@@ -904,7 +990,8 @@ def _render_notification_html(
     Your call list is ready —
     <b style="color:#F34039">{counts['missed']}</b> missed call{'s' if counts['missed'] != 1 else ''},
     <b style="color:#0066EE">{counts['membership']}</b> membership opportunit{'ies' if counts['membership'] != 1 else 'y'},
-    and <b style="color:#F2A93B">{counts['sleeping']}</b> sleeping customer{'s' if counts['sleeping'] != 1 else ''}
+    <b style="color:#F2A93B">{counts['sleeping']}</b> sleeping customer{'s' if counts['sleeping'] != 1 else ''},
+    and <b style="color:#8B5CF6">{counts.get('estimate', 0)}</b> aging estimate{'s' if counts.get('estimate', 0) != 1 else ''}
     to reach out to today.
   </p>
 
@@ -963,17 +1050,25 @@ def main() -> int:
                   if dedup_key("missed", r.get("customer_id"), r.get("id")) not in suppress["missed"]
                  ][:SECTION_CAPS["missed"]]
 
+        estimates_all = load_open_estimates(conn, min_age_days=30)
+        estimates = [r for r in estimates_all
+                     if dedup_key("estimate", r.get("customer_id"), r.get("id")) not in suppress["estimate"]
+                    ][:SECTION_CAPS["estimate"]]
+
     counts = {
         "missed": len(missed),
         "membership": len(memberships),
         "sleeping": len(sleeping),
+        "estimate": len(estimates),
     }
     print(f"Today's counts — missed: {counts['missed']}, "
-          f"membership: {counts['membership']}, sleeping: {counts['sleeping']}")
+          f"membership: {counts['membership']}, sleeping: {counts['sleeping']}, "
+          f"estimate: {counts['estimate']}")
 
     # Hot leads — customers who called us back since first rec
     hot_leads: list[dict] = []
-    for kind_label, rows in (("missed", missed), ("membership", memberships), ("sleeping", sleeping)):
+    for kind_label, rows in (("missed", missed), ("membership", memberships),
+                              ("sleeping", sleeping), ("estimate", estimates)):
         for r in rows:
             cid = r.get("customer_id")
             if cid and (outreach_map.get(cid) or {}).get("called_back_at"):
@@ -989,7 +1084,8 @@ def main() -> int:
         f"Good morning, Fey — {today_str}.",
         "",
         f"Your call list: {counts['missed']} missed calls, "
-        f"{counts['membership']} membership opps, {counts['sleeping']} sleeping customers ({total} total).",
+        f"{counts['membership']} membership opps, {counts['sleeping']} sleeping customers, "
+        f"{counts.get('estimate', 0)} aging estimates ({total} total).",
     ]
     if hot_leads:
         text_lines.append("")
@@ -1060,6 +1156,18 @@ def main() -> int:
                          json.dumps({"customer_name": r.get("customer_name"),
                                      "call_type": r.get("call_type"),
                                      "received_on": str(r.get("received_on") or "")})))
+    for r in estimates:
+        cid = r.get("customer_id")
+        est_id = r.get("id")
+        key = dedup_key("estimate", cid, est_id)
+        # call_id column re-used to hold estimate_id — dedup_key embeds
+        # the type ("est" vs "call") so they don't collide.
+        log_rows.append(("estimate", cid, est_id, key,
+                         json.dumps({"customer_name": r.get("customer_name"),
+                                     "estimate_id": est_id,
+                                     "subtotal": float(r.get("subtotal") or 0),
+                                     "age_days": int(r.get("age_days") or 0),
+                                     "estimate_name": r.get("estimate_name")})))
     is_dry_run = os.environ.get("CSR_DRY_RUN", "").lower() in ("1", "true", "yes")
     if log_rows and not is_dry_run:
         with db() as conn:
