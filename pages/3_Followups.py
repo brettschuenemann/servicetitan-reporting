@@ -25,7 +25,12 @@ st.caption(
 
 @st.cache_data(ttl=120, show_spinner="Loading estimates…")
 def load_open_estimates() -> pd.DataFrame:
-    """Pull all Open estimates joined with customer name from invoices."""
+    """Pull all Open estimates joined with customer name and marketing source.
+
+    Source comes from the originating job's campaign (jobs.campaign_id →
+    campaigns.name). About 35% of estimates have no campaign attached —
+    those show as '—' in the table.
+    """
     with db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -47,9 +52,12 @@ def load_open_estimates() -> pd.DataFrame:
                   e.job_number,
                   e.customer_id,
                   COALESCE(cn.name, 'cust ' || e.customer_id::text)   AS customer,
+                  c.name                                              AS source,
                   EXTRACT(DAY FROM (NOW() - e.created_on))::int       AS age_days
                 FROM estimates e
                 LEFT JOIN cust_name cn ON cn.customer_id = e.customer_id
+                LEFT JOIN jobs j       ON j.id = e.job_id
+                LEFT JOIN campaigns c  ON c.id = j.campaign_id
                 WHERE e.status_name = 'Open' AND e.active = TRUE
                 ORDER BY e.created_on ASC
                 """
@@ -110,6 +118,7 @@ st.caption(
 display = filtered.assign(
     created=lambda d: d["created_on"].dt.strftime("%Y-%m-%d"),
     value=lambda d: d["subtotal"].map(lambda v: f"${v:,.2f}"),
+    source_disp=lambda d: d["source"].fillna("—"),
 ).rename(
     columns={
         "customer": "Customer",
@@ -119,6 +128,7 @@ display = filtered.assign(
         "age_days": "Age (days)",
         "created": "Created",
         "business_unit_name": "Business unit",
+        "source_disp": "Source",
     }
 )[
     [
@@ -127,6 +137,7 @@ display = filtered.assign(
         "Age (days)",
         "Created",
         "Business unit",
+        "Source",
         "Estimate",
         "Summary",
     ]
@@ -144,6 +155,7 @@ csv_cols = [
     "created_on",
     "modified_on",
     "business_unit_name",
+    "source",
     "job_number",
     "estimate_name",
     "summary",
