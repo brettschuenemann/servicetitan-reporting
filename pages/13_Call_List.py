@@ -20,7 +20,7 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.auth import require_csr_password
-from lib.call_openers import generate_openers
+from lib.call_openers import _first_names, generate_openers
 from lib.csr_outcomes import (
     OUTCOME_CONFIG,
     dedup_key,
@@ -116,6 +116,12 @@ def _lookup_contact_cached(customer_id: int) -> tuple[str, str]:
 
 
 # ---------- action callbacks (clear caches + rerun handled by Streamlit) ----------
+# Callbacks can't render — they must stash a "toast" in session_state and
+# fire it on the next run. Cleaner UX than a silent action.
+
+def _queue_toast(message: str, icon: str = "✅") -> None:
+    st.session_state["pending_toast"] = (message, icon)
+
 
 def _on_record_outcome(kind: str, customer_id: int | None,
                        call_id: int | None, outcome: str):
@@ -124,6 +130,8 @@ def _on_record_outcome(kind: str, customer_id: int | None,
         with db() as conn:
             record_outcome(conn, kind, customer_id, call_id, outcome)
         _load_sections.clear()
+        label = outcome.replace("_", " ").title()
+        _queue_toast(f"Marked **{label}** — they'll drop from your list.")
     except Exception as exc:
         st.session_state["action_error"] = str(exc)
 
@@ -133,6 +141,7 @@ def _on_undo(outcome_id: int):
         with db() as conn:
             undo_outcome(conn, outcome_id)
         _load_sections.clear()
+        _queue_toast("Undone — customer is back on the list.", icon="↩️")
     except Exception as exc:
         st.session_state["action_error"] = str(exc)
 
@@ -146,11 +155,51 @@ def _on_save_note(customer_id: int, note_key: str):
             save_note(conn, customer_id, text)
         st.session_state[note_key] = ""  # clear after save
         _load_sections.clear()
+        _queue_toast("Note saved.", icon="📝")
     except Exception as exc:
         st.session_state["action_error"] = str(exc)
 
 
 # ---------- helpers ----------
+
+def _current_season() -> str:
+    """Return 'cooling' (Apr-Oct) or 'heating' (Nov-Mar) for [cooling/heating]."""
+    return "cooling" if 4 <= date.today().month <= 10 else "heating"
+
+
+def _personalize_script_line(line: str, row: dict, kind: str) -> str:
+    """Replace [name], [install date], [last service], [cooling/heating]
+    placeholders with values from this specific customer's record."""
+    # Name handling — works for businesses ("there"), single customers,
+    # and couples ("Andrew and Karen").
+    firsts = _first_names(row.get("customer_name") or "")
+    if not firsts:
+        name_token = "there"  # business or no first name
+    elif len(firsts) == 1:
+        name_token = firsts[0]
+    else:
+        name_token = f"{firsts[0]} and {firsts[1]}"
+    line = line.replace("[name]", name_token)
+
+    # Season is always swap-able regardless of kind.
+    line = line.replace("[cooling/heating]", _current_season())
+
+    if kind == "membership":
+        install_date = row.get("install_date")
+        if install_date:
+            line = line.replace("[install date]", install_date.strftime("%B %-d"))
+        else:
+            line = line.replace("[install date]", "your recent install")
+    elif kind == "sleeping":
+        last_summary = (row.get("last_summary") or "").strip()
+        if last_summary and "imported default" not in last_summary.lower():
+            short_summary = last_summary[:80].rstrip(".").lower()
+            line = line.replace("[last service]", short_summary)
+        else:
+            line = line.replace("[last service]", "your last visit")
+
+    return line
+
 
 def _row_passes_filter(row: dict, kind: str, outreach: dict | None) -> bool:
     """Apply the active filter chip + search box."""
@@ -232,7 +281,15 @@ def _pending_days(first_seen) -> int | None:
 
 st.title("📞 Call List")
 today_str = date.today().strftime("%A, %B %d, %Y")
-st.caption(today_str)
+
+# Flush any pending toast queued by a callback on the previous run.
+if "pending_toast" in st.session_state:
+    _msg, _icon = st.session_state.pop("pending_toast")
+    st.toast(_msg, icon=_icon)
+
+# Header caption with last-load timestamp so Fey knows how fresh the data is.
+_loaded_at = datetime.now().strftime("%-I:%M %p")
+st.caption(f"{today_str} · Data loaded at {_loaded_at}")
 
 if st.session_state.get("action_error"):
     st.error(f"Action failed: {st.session_state['action_error']}")
@@ -471,6 +528,20 @@ def render_row(r: dict, kind: str, call_id: int | None = None):
             unsafe_allow_html=True,
         )
 
+        # Per-row personalized script. Expanded by default so the full
+        # talking points are always in view next to this customer's data.
+        # Placeholders are replaced with the customer's actual record so
+        # Fey can read it almost verbatim.
+        script_items = CALL_SCRIPTS.get(kind, [])
+        if script_items:
+            with st.expander("📋 Call script", expanded=True):
+                for script_label, script_line in script_items:
+                    personalized = _personalize_script_line(script_line, r, kind)
+                    st.markdown(
+                        f"**{escape(script_label).upper()}** — {escape(personalized)}",
+                        unsafe_allow_html=False,
+                    )
+
         # Action buttons row. Missed calls can be recorded against the
         # call_id even without a matched customer (unknown callers); the
         # other sections require a customer_id.
@@ -491,16 +562,33 @@ def render_row(r: dict, kind: str, call_id: int | None = None):
                 ),
             )
 
-        # Notes section (collapsed by default)
+        # Notes section. Surface the most recent note inline (above the
+        # expander) so Fey sees prior context without having to open it.
         if cid:
             existing_notes = notes_map.get(cid, [])
-            label = "📝 Notes" + (f" ({len(existing_notes)})" if existing_notes else "")
+            if existing_notes:
+                most_recent = existing_notes[0]
+                preview = short(most_recent["note"], 140)
+                st.markdown(
+                    f"<div style='margin-top:8px;padding:6px 10px;"
+                    f"background:#FFFBEB;border-left:3px solid #F59E0B;"
+                    f"border-radius:4px;font-size:12px;color:#78350F'>"
+                    f"<b>📝 Last note · {most_recent['created_at']:%b %d, %-I:%M %p}</b> — "
+                    f"<i>{escape(preview)}</i></div>",
+                    unsafe_allow_html=True,
+                )
+            label = (
+                f"📝 Notes ({len(existing_notes)}) — add another"
+                if existing_notes else "📝 Add a note"
+            )
             with st.expander(label):
-                for n in existing_notes[:3]:
-                    st.caption(
-                        f"_{n['created_at']:%b %d, %I:%M %p}_ — "
-                        + escape(n["note"][:300])
-                    )
+                if len(existing_notes) > 1:
+                    st.caption("Older notes:")
+                    for n in existing_notes[1:4]:
+                        st.caption(
+                            f"_{n['created_at']:%b %d, %-I:%M %p}_ — "
+                            + escape(n["note"][:300])
+                        )
                 note_key = f"note_input_{cid}_{call_id or 0}"
                 st.text_area(
                     "Add a note",
@@ -538,21 +626,36 @@ for kind, label, color, rows in section_specs:
         continue
     # Pre-filter by search/hot/untouched
     filtered_rows = [r for r in rows if _row_passes_filter(r, kind, _outreach_for(state, r.get("customer_id")))]
+
+    # Sort hot leads (called us back) to the top of the section so Fey
+    # can power through the highest-priority ones first.
+    def _row_priority(r):
+        cid = r.get("customer_id")
+        info = state["outreach"].get(cid, {}) if cid else {}
+        return 0 if info.get("called_back_at") else 1
+    filtered_rows.sort(key=_row_priority)
+
     count = len(filtered_rows)
-    with st.expander(f"{label} ({count})", expanded=(count > 0 and kind == "missed")):
+    hot_count_in_section = sum(
+        1 for r in filtered_rows
+        if (state["outreach"].get(r.get("customer_id"), {}) or {}).get("called_back_at")
+    )
+    # Show the hot-lead count in the section header when there are any.
+    header = f"{label} ({count})"
+    if hot_count_in_section:
+        header = f"{label} ({count}) · 🔥 {hot_count_in_section} hot"
+
+    with st.expander(header, expanded=(count > 0 and kind == "missed")):
         if count == 0:
-            empty_state("Nothing here right now.")
+            empty_msg = {
+                "missed": "🎉 No missed calls to chase. Nice work.",
+                "membership": "🎉 Every recent install customer has been handled.",
+                "sleeping": "🎉 No sleeping customers in rotation right now.",
+            }.get(kind, "🎉 Nothing here — focus on the other sections.")
+            empty_state(empty_msg)
         else:
-            # Shared call script for this section — collapsed by default so
-            # it doesn't push rows down once Fey has memorized it.
-            script_items = CALL_SCRIPTS.get(kind, [])
-            if script_items:
-                with st.expander("📋 Call script for this section", expanded=False):
-                    for script_label, script_line in script_items:
-                        st.markdown(
-                            f"**{escape(script_label).upper()}** — {escape(script_line)}",
-                            unsafe_allow_html=False,
-                        )
+            # The call script now lives per-row (personalized) right next
+            # to each customer's data, so no section-level header needed.
             for r in filtered_rows:
                 render_row(r, kind, call_id=r.get("id") if kind == "missed" else None)
 
