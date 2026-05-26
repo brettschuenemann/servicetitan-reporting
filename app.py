@@ -55,6 +55,34 @@ page_header(
     "Revenue ledger reconciled to the accountant's P&L within 0.5%.",
 )
 
+# ---------- Manual sync (prominent, top of page) ----------
+# An hourly cron runs `sync_for_email()` automatically during business
+# hours, but this button lets you pull right now if a new invoice or
+# customer interaction just landed in ServiceTitan and you want it on
+# the dashboard immediately.
+_sync_col, _sync_status = st.columns([1, 4])
+with _sync_col:
+    _sync_clicked = st.button(
+        "☁️ Sync ServiceTitan",
+        use_container_width=True,
+        type="primary",
+        help="Pull new invoices/calls/jobs/etc. from ServiceTitan now (~10s). "
+             "Otherwise data auto-syncs hourly during business hours.",
+    )
+_sync_status_box = _sync_status.empty()
+if _sync_clicked:
+    try:
+        with db() as _conn:
+            sync_all(get_client(), _conn,
+                     progress=lambda m: _sync_status_box.info(f"Syncing… {m}"))
+        _sync_status_box.success("Synced. Reloading…")
+        st.cache_data.clear()
+        st.rerun()
+    except Exception as exc:
+        _sync_status_box.error(f"Sync failed: {exc}")
+
+st.divider()
+
 # ---------- AI summary (top of page, independent of date filter) ----------
 _summary_today = date.today().isoformat()
 _summary_header, _summary_button = st.columns([4, 1])
