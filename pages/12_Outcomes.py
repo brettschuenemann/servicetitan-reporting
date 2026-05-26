@@ -20,69 +20,30 @@ If you want a stricter posture, add HMAC-signed tokens to the URLs.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
 import pandas as pd
 import streamlit as st
 
+from lib.csr_outcomes import (
+    OUTCOME_CONFIG,
+    record_outcome as _record_outcome,
+    undo_outcome as _undo_outcome,
+)
 from lib.database import db
 from lib.style import apply_mobile_styles, empty_state
 
 st.set_page_config(page_title="Outcomes · Pure Comfort", layout="wide")
 apply_mobile_styles()
 
-# ---------- outcome catalog ----------
 
-OUTCOME_CONFIG: dict[str, dict[str, dict]] = {
-    "membership": {
-        "enrolled":     {"label": "Enrolled",       "expires_days": None, "color": "#10B981"},
-        "declined":     {"label": "Declined",       "expires_days": 180,  "color": "#EF4444"},
-        "try_later":    {"label": "Try later",      "expires_days": 60,   "color": "#F59E0B"},
-        "wrong_number": {"label": "Wrong number",   "expires_days": None, "color": "#6B7280"},
-    },
-    "sleeping": {
-        "reactivated":  {"label": "Reactivated",    "expires_days": None, "color": "#10B981"},
-        "declined":     {"label": "Declined",       "expires_days": 180,  "color": "#EF4444"},
-        "try_later":    {"label": "Try later",      "expires_days": 60,   "color": "#F59E0B"},
-        "wrong_number": {"label": "Wrong number",   "expires_days": None, "color": "#6B7280"},
-    },
-    "missed": {
-        "followed_up":  {"label": "Followed up",    "expires_days": None, "color": "#10B981"},
-        "voicemail":    {"label": "Voicemail left", "expires_days": 7,    "color": "#F59E0B"},
-        "try_later":    {"label": "Try later",      "expires_days": 7,    "color": "#F59E0B"},
-        "wrong_number": {"label": "Wrong number",   "expires_days": None, "color": "#6B7280"},
-    },
-}
+def record_outcome(kind, customer_id, call_id, outcome, notes=None):
+    """Wrapper that opens its own DB connection."""
+    with db() as conn:
+        return _record_outcome(conn, kind, customer_id, call_id, outcome, notes)
 
 
-def dedup_key(kind: str, customer_id: int | None, call_id: int | None = None) -> str:
-    if kind == "missed" and call_id is not None:
-        return f"{kind}:call:{call_id}"
-    return f"{kind}:cust:{customer_id}"
-
-
-def record_outcome(kind: str, customer_id: int | None, call_id: int | None,
-                   outcome: str, notes: str | None = None) -> tuple[int, dict]:
-    """Insert an outcome row. Returns (id, config) for the new outcome."""
-    cfg = OUTCOME_CONFIG[kind][outcome]
-    expires_at = (
-        datetime.now(timezone.utc) + timedelta(days=cfg["expires_days"])
-        if cfg["expires_days"] else None
-    )
-    key = dedup_key(kind, customer_id, call_id)
-    with db() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO csr_customer_outcomes
-              (kind, customer_id, call_id, dedup_key, outcome, expires_at, notes)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            RETURNING id
-            """,
-            (kind, customer_id, call_id, key, outcome, expires_at, notes),
-        )
-        new_id = cur.fetchone()["id"]
-        conn.commit()
-    return new_id, cfg
+def undo_outcome(outcome_id: int) -> None:
+    with db() as conn:
+        _undo_outcome(conn, outcome_id)
 
 
 def lookup_customer_name(customer_id: int | None) -> str:
@@ -116,27 +77,6 @@ def load_recent_outcomes(limit: int = 30) -> pd.DataFrame:
             (limit,),
         )
         return pd.DataFrame([dict(r) for r in cur.fetchall()])
-
-
-def undo_outcome(outcome_id: int) -> None:
-    """Soft-undo by inserting a sentinel that supersedes the prior outcome."""
-    with db() as conn, conn.cursor() as cur:
-        cur.execute(
-            "SELECT kind, customer_id, call_id, dedup_key FROM csr_customer_outcomes WHERE id = %s",
-            (outcome_id,),
-        )
-        row = cur.fetchone()
-        if not row:
-            return
-        cur.execute(
-            """
-            INSERT INTO csr_customer_outcomes
-              (kind, customer_id, call_id, dedup_key, outcome, expires_at, notes)
-            VALUES (%s, %s, %s, %s, 'undone', NULL, 'Undid outcome ' || %s)
-            """,
-            (row["kind"], row["customer_id"], row["call_id"], row["dedup_key"], str(outcome_id)),
-        )
-        conn.commit()
 
 
 # ---------- main page ----------

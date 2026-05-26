@@ -120,6 +120,27 @@ def fmt_money(v) -> str:
     return f"${float(v or 0):,.0f}"
 
 
+# Call timestamps from ServiceTitan come back as UTC. Convert to Central
+# (Chicagoland) before formatting for display — otherwise an 8 PM call
+# shows up as 2 AM the next day.
+try:
+    from zoneinfo import ZoneInfo  # stdlib on Python 3.9+
+    _CENTRAL_TZ = ZoneInfo("America/Chicago")
+    _UTC_TZ = ZoneInfo("UTC")
+except ImportError:  # very old Python — no-op fallback
+    _CENTRAL_TZ = None
+    _UTC_TZ = None
+
+
+def to_central(dt):
+    """Convert a UTC-aware (or naive=UTC-assumed) datetime to Central."""
+    if dt is None or _CENTRAL_TZ is None:
+        return dt
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_UTC_TZ)
+    return dt.astimezone(_CENTRAL_TZ)
+
+
 # ---------- contact lookup with cache ----------
 
 _contact_cache: dict[int, tuple[str, str]] = {}
@@ -433,11 +454,13 @@ SUPPRESS_DAYS_SHORT = {  # used when only voicemails/no-answers detected
     "missed":     2,
 }
 
-# Hard caps per section so a backlog doesn't produce a 100-row email.
+# Hard caps per section so a backlog doesn't produce a 100-row email/page.
+# Same number across all three keeps Fey's daily workload predictable and
+# the page scannable in one viewport on mobile.
 SECTION_CAPS = {
     "missed":     10,
-    "membership": 25,
-    "sleeping":   15,
+    "membership": 10,
+    "sleeping":   10,
 }
 
 # Base URL for the Streamlit app (used to build outcome-action links in the
@@ -821,6 +844,89 @@ def _pending_days(first_seen: datetime | None) -> int | None:
 
 # ---------- main ----------
 
+
+
+# ---------- main: send a SHORT notification email linking to the Call List page ----------
+
+# Where the live Call List page lives. From the same secret used by the
+# outcome-action links — graceful fallback if unset.
+_CALL_LIST_URL = (os.environ.get("STREAMLIT_BASE_URL") or "").rstrip("/")
+
+
+def _render_notification_html(
+    counts: dict[str, int],
+    hot_leads: list[dict],
+    today_str: str,
+    call_list_url: str,
+) -> str:
+    """Short HTML notification — counts, hot leads, prominent CTA to the live page."""
+    total = counts["missed"] + counts["membership"] + counts["sleeping"]
+
+    hot_html = ""
+    if hot_leads:
+        items = "".join(
+            f"<li style='margin:4px 0'><b>{escape(h['customer_name'] or 'Unknown')}</b> "
+            f"called us back — <i>{escape(h['kind'])}</i> section</li>"
+            for h in hot_leads[:5]
+        )
+        hot_html = (
+            f"<div style='background:#FED7AA;border-left:4px solid #9A3412;"
+            f"padding:12px 14px;border-radius:6px;margin:16px 0'>"
+            f"<div style='font-size:13px;font-weight:700;color:#9A3412;"
+            f"text-transform:uppercase;letter-spacing:0.04em;margin-bottom:6px'>"
+            f"🔥 Hot leads — call these first</div>"
+            f"<ul style='margin:0;padding-left:20px;font-size:14px;color:#7C2D12'>{items}</ul>"
+            f"</div>"
+        )
+
+    cta = ""
+    if call_list_url:
+        cta = (
+            f"<div style='text-align:center;margin:24px 0'>"
+            f"<a href='{call_list_url}/Call_List' "
+            f"style='display:inline-block;background:#0066EE;color:white;"
+            f"padding:14px 32px;border-radius:8px;text-decoration:none;"
+            f"font-size:16px;font-weight:700'>📞 Open your call list</a>"
+            f"</div>"
+            f"<p style='text-align:center;font-size:12px;color:#888'>"
+            f"Tip: bookmark the page — it's live all day. New missed calls and "
+            f"hot leads appear automatically.</p>"
+        )
+    else:
+        cta = (
+            f"<p style='color:#EF4444;margin:16px 0;font-size:13px'>"
+            f"⚠️ STREAMLIT_BASE_URL isn't configured — the dashboard URL "
+            f"isn't linked. Add it as a GitHub Actions secret to enable.</p>"
+        )
+
+    return f"""<!doctype html>
+<html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f7f7f7;margin:0;padding:24px">
+<div style="max-width:560px;margin:0 auto;background:white;border-radius:8px;padding:28px 32px;border:1px solid #e5e7eb">
+  <h1 style="margin:0 0 6px 0;color:#00214D;font-size:22px">Good morning, Fey 👋</h1>
+  <p style="margin:0 0 20px 0;color:#555;font-size:14px">{today_str}</p>
+
+  <p style="font-size:15px;color:#111;line-height:1.55">
+    Your call list is ready —
+    <b style="color:#F34039">{counts['missed']}</b> missed call{'s' if counts['missed'] != 1 else ''},
+    <b style="color:#0066EE">{counts['membership']}</b> membership opportunit{'ies' if counts['membership'] != 1 else 'y'},
+    and <b style="color:#F2A93B">{counts['sleeping']}</b> sleeping customer{'s' if counts['sleeping'] != 1 else ''}
+    to reach out to today.
+  </p>
+
+  {hot_html}
+
+  {cta}
+
+  <hr style="border:none;border-top:1px solid #e5e7eb;margin:24px 0">
+  <p style="font-size:12px;color:#888;margin:0">
+    Action buttons live inline on the page now — tap <b>✅ Enrolled</b>, <b>❌ Declined</b>,
+    or <b>🔁 Try later</b> after each call and the list updates instantly.
+    No more separate email link per row.
+  </p>
+</div>
+</body></html>"""
+
+
 def main() -> int:
     client = ServiceTitanClient(
         app_key=os.environ["ST_APP_KEY"], tenant_id=os.environ["ST_TENANT_ID"],
@@ -836,289 +942,101 @@ def main() -> int:
     with db() as conn:
         sync_for_email(client, conn, progress=lambda m: print(f"  · {m}"))
 
-        print("Loading recommendation history + outreach signals…")
+        # Load the same data the page will load so counts match and the
+        # recommendation log is populated (suppression depends on it).
         state = load_recommendation_state(conn)
         suppress = state["suppress"]
-        first_seen_map = state["first_seen"]
-        outreach_map = state["outreach"]  # customer_id -> {called_at, called_back_at}
-        print(f"  · suppressing — memberships: {len(suppress['membership'])}, "
-              f"sleeping: {len(suppress['sleeping'])}, missed: {len(suppress['missed'])}")
-        print(f"  · outreach detected for {len(outreach_map)} customers since first rec")
+        outreach_map = state["outreach"]
 
-        print("Loading membership opportunities…")
         memberships_all = load_membership_opps(conn)
-        memberships_filtered = [
-            r for r in memberships_all
-            if dedup_key("membership", r.get("customer_id")) not in suppress["membership"]
-        ]
-        memberships_total_pending = len(memberships_filtered)
-        memberships = memberships_filtered[:SECTION_CAPS["membership"]]
-        print(f"  · {len(memberships)} shown ({memberships_total_pending} pending; suppressed {len(memberships_all) - memberships_total_pending})")
+        memberships = [r for r in memberships_all
+                       if dedup_key("membership", r.get("customer_id")) not in suppress["membership"]
+                      ][:SECTION_CAPS["membership"]]
 
-        print("Loading sleeping customers…")
-        # Pull a wider pool than the cap so suppression doesn't shrink the visible list.
         sleeping_all = load_sleeping_customers(conn, limit=SECTION_CAPS["sleeping"] * 4)
-        sleeping_filtered = [
-            r for r in sleeping_all
-            if dedup_key("sleeping", r.get("customer_id")) not in suppress["sleeping"]
-        ]
-        sleeping_total_pending = len(sleeping_filtered)
-        sleeping = sleeping_filtered[:SECTION_CAPS["sleeping"]]
-        print(f"  · {len(sleeping)} shown ({sleeping_total_pending} above cap; suppressed {len(suppress['sleeping'])})")
+        sleeping = [r for r in sleeping_all
+                    if dedup_key("sleeping", r.get("customer_id")) not in suppress["sleeping"]
+                   ][:SECTION_CAPS["sleeping"]]
 
-        print("Loading missed calls…")
         missed_all = load_missed_calls(conn)
-        missed_filtered = [
-            r for r in missed_all
-            if dedup_key("missed", r.get("customer_id"), r.get("id")) not in suppress["missed"]
-        ]
-        missed_total_pending = len(missed_filtered)
-        missed = missed_filtered[:SECTION_CAPS["missed"]]
-        print(f"  · {len(missed)} shown ({missed_total_pending} pending; suppressed {len(missed_all) - missed_total_pending})")
+        missed = [r for r in missed_all
+                  if dedup_key("missed", r.get("customer_id"), r.get("id")) not in suppress["missed"]
+                 ][:SECTION_CAPS["missed"]]
 
-    # ---- Enrich with contact info ----
-    print("Looking up contact info…")
-    for r in memberships:
-        r["phone"], r["email"] = lookup_contact(client, r.get("customer_id"))
-    for r in sleeping:
-        r["phone"], r["email"] = lookup_contact(client, r.get("customer_id"))
-    for r in missed:
-        # Use call's from_phone first; only API-lookup when customer matched
-        if r.get("customer_id"):
-            r["phone"], r["email"] = lookup_contact(client, r["customer_id"])
-            if not r["phone"]:
-                r["phone"] = r.get("from_phone") or ""
-        else:
-            r["phone"] = r.get("from_phone") or ""
-            r["email"] = ""
+    counts = {
+        "missed": len(missed),
+        "membership": len(memberships),
+        "sleeping": len(sleeping),
+    }
+    print(f"Today's counts — missed: {counts['missed']}, "
+          f"membership: {counts['membership']}, sleeping: {counts['sleeping']}")
 
-    # ---- Personalized openers (one batched Claude call) ----
-    today_d = date.today()
-    opener_customers: list[dict] = []
-    for r in memberships:
-        install_date = r.get("install_date")
-        opener_customers.append({
-            "customer_id":      r.get("customer_id"),
-            "customer_name":    r.get("customer_name"),
-            "kind":             "membership",
-            "equipment":        r.get("equipment"),
-            "install_summary":  r.get("install_summary"),
-            "install_days_ago": (today_d - install_date).days if install_date else None,
-            "install_value":    float(r.get("install_value") or 0),
-            "lifetime_revenue": float(r.get("lifetime_revenue") or 0),
-            "lifetime_invoices": int(r.get("lifetime_invoices") or 0),
-            "first_visit_year": r["first_visit"].year if r.get("first_visit") else None,
-        })
-    for r in sleeping:
-        last_visit = r.get("last_visit")
-        opener_customers.append({
-            "customer_id":         r.get("customer_id"),
-            "customer_name":       r.get("customer_name"),
-            "kind":                "sleeping",
-            "last_visit_days_ago": (today_d - last_visit).days if last_visit else None,
-            "last_summary":        r.get("last_summary"),
-            "last_items":          r.get("last_items"),
-            "loyal_revenue":       float(r.get("loyal_revenue") or 0),
-            "loyal_invoices":      int(r.get("loyal_invoices") or 0),
-        })
-    for r in missed:
-        received = r.get("received_on")
-        last_visit = r.get("last_visit")
-        opener_customers.append({
-            "customer_id":           r.get("customer_id"),
-            "customer_name":         r.get("customer_name") or "Unknown",
-            "kind":                  "missed",
-            "call_type":             r.get("call_type"),
-            "call_when":             received.strftime("%a %I:%M %p") if received else "earlier",
-            "lifetime_revenue":      float(r.get("lifetime_revenue") or 0),
-            "lifetime_invoices":     int(r.get("lifetime_invoices") or 0),
-            "last_visit_days_ago":   (today_d - last_visit).days if last_visit else None,
-            "last_invoice_summary":  r.get("last_invoice_summary"),
-        })
-
-    print(f"Generating personalized openers via Claude for {len([c for c in opener_customers if c.get('customer_id')])} customers…")
-    opener_map = generate_openers(opener_customers)
-    print(f"  · got {len(opener_map)} openers back")
-
-    # ---- Build HTML sections ----
-    def _row_status(customer_id: int | None, dkey: str) -> dict:
-        """Compute badge inputs for one row."""
-        return {
-            "pending_days": _pending_days(first_seen_map.get(dkey)),
-            "outreach_info": outreach_map.get(customer_id) if customer_id else None,
-        }
-
-    mem_rows_html = "".join(
-        html_customer_row(
-            name=r.get("customer_name") or "Customer",
-            phone=r.get("phone") or "",
-            email=r.get("email") or "",
-            opener_text=opener_map.get(r.get("customer_id")),
-            **_row_status(r.get("customer_id"), dedup_key("membership", r.get("customer_id"))),
-            action_links_html=render_action_links("membership", r.get("customer_id")),
-            primary_line=(
-                f"<b>{fmt_money(r['install_value'])}</b> install on "
-                f"{r['install_date']:%a %b %d} ({days_ago(r['install_date'])}) "
-                f"&middot; {escape(r.get('business_unit_name') or 'no BU')}"
-                + (f" &middot; <i>{escape(short(r['equipment'], 80))}</i>" if r.get('equipment') else "")
-            ),
-            history_line=(
-                f"Lifetime: {fmt_money(r.get('lifetime_revenue'))} across "
-                f"{int(r.get('lifetime_invoices') or 0)} visits"
-                + (f" · customer since {r['first_visit']:%b %Y}" if r.get('first_visit') else "")
-                + " — pitch the maintenance plan; they just spent and trust us"
-            ),
-        )
-        for r in memberships
-    )
-
-    sleep_rows_html = "".join(
-        html_customer_row(
-            name=r.get("customer_name") or "Customer",
-            phone=r.get("phone") or "",
-            email=r.get("email") or "",
-            opener_text=opener_map.get(r.get("customer_id")),
-            **_row_status(r.get("customer_id"), dedup_key("sleeping", r.get("customer_id"))),
-            action_links_html=render_action_links("sleeping", r.get("customer_id")),
-            primary_line=(
-                f"Last visit <b>{days_ago(r['last_visit'])}</b> ({r['last_visit']:%b %d, %Y})"
-                + (f" &middot; <i>{escape(short(r['last_summary'], 80))}</i>" if r.get('last_summary') else "")
-            ),
-            history_line=(
-                f"Loyal-period spend: {fmt_money(r.get('loyal_revenue'))} across "
-                f"{int(r.get('loyal_invoices') or 0)} visits "
-                "— offer a tune-up or seasonal check-in"
-            ),
-        )
-        for r in sleeping
-    )
-
-    missed_rows_html = "".join(
-        html_customer_row(
-            name=r.get("customer_name") or "Unknown caller",
-            phone=r.get("phone") or "",
-            email=r.get("email") or "",
-            opener_text=opener_map.get(r.get("customer_id")),
-            **_row_status(r.get("customer_id"), dedup_key("missed", r.get("customer_id"), r.get("id"))),
-            action_links_html=render_action_links("missed", r.get("customer_id"), r.get("id")),
-            primary_line=(
-                f"<b>{escape(r['call_type'])}</b> at "
-                f"{r['received_on']:%-I:%M %p} on {r['received_on']:%a %b %d}"
-                + (f" &middot; reason: <i>{escape(r['reason'])}</i>" if r.get('reason') else "")
-                + (f" &middot; CSR: {escape(r['agent_name'])}" if r.get('agent_name') else "")
-            ),
-            history_line=(
-                (f"Existing customer · lifetime {fmt_money(r.get('lifetime_revenue'))} "
-                 f"across {int(r.get('lifetime_invoices') or 0)} visits · "
-                 f"last visit {days_ago(r.get('last_visit'))}")
-                if r.get("customer_id")
-                else "No customer match — new lead from this number"
-            ),
-        )
-        for r in missed
-    )
+    # Hot leads — customers who called us back since first rec
+    hot_leads: list[dict] = []
+    for kind_label, rows in (("missed", missed), ("membership", memberships), ("sleeping", sleeping)):
+        for r in rows:
+            cid = r.get("customer_id")
+            if cid and (outreach_map.get(cid) or {}).get("called_back_at"):
+                hot_leads.append({"customer_name": r.get("customer_name"), "kind": kind_label})
+    print(f"Hot leads detected: {len(hot_leads)}")
 
     today_str = date.today().strftime("%A, %B %d, %Y")
-    total_calls = len(memberships) + len(sleeping) + len(missed)
-    subject = f"☎️  Daily call list ({total_calls}) — {today_str}"
+    html_body = _render_notification_html(counts, hot_leads, today_str, _CALL_LIST_URL)
 
-    suppressed_total = (
-        len(suppress["membership"]) + len(suppress["sleeping"]) + len(suppress["missed"])
-    )
-    suppression_note = (
-        f" <span style='color:#888'>· skipped {suppressed_total} already on recent lists</span>"
-        if suppressed_total else ""
-    )
-
-    html = f"""<!doctype html>
-<html><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f7f7f7;margin:0;padding:24px">
-<div style="max-width:720px;margin:0 auto">
-  <h1 style="margin:0 0 4px 0;color:#00214D;font-size:22px">Good morning, Fey 👋</h1>
-  <p style="margin:0 0 20px 0;color:#555;font-size:14px">
-    Here's your call list for {today_str}.
-    <b>{len(memberships)}</b> membership opportunities ·
-    <b>{len(sleeping)}</b> sleeping customers ·
-    <b>{len(missed)}</b> missed calls.{suppression_note}<br>
-    Tap-to-dial phones. Badges (inferred from call duration):
-    <span style="color:#9A3412">📥 Called us back</span> (hottest, surfaced even within cooldown) ·
-    <span style="color:#065F46">📞 Spoke</span> (real conversation, full cooldown) ·
-    <span style="color:#991B1B">📨 Voicemail / 🔕 No answer</span> (try again sooner) ·
-    <span style="color:#92400E">🔁 Pending</span> (rec'd before, no outreach detected).
-  </p>
-  {html_section('missed',     missed_rows_html, len(missed),
-                suppressed_count=len(missed_all) - missed_total_pending,
-                more_pending=max(0, missed_total_pending - len(missed)))}
-  {html_section('membership', mem_rows_html,    len(memberships),
-                suppressed_count=len(memberships_all) - memberships_total_pending,
-                more_pending=max(0, memberships_total_pending - len(memberships)))}
-  {html_section('sleeping',   sleep_rows_html,  len(sleeping),
-                suppressed_count=len(suppress['sleeping']),
-                more_pending=max(0, sleeping_total_pending - len(sleeping)))}
-  <p style="color:#888;font-size:11px;margin-top:24px;text-align:center">
-    Generated automatically from ServiceTitan. Questions? Check the dashboard.
-  </p>
-</div>
-</body></html>"""
-
-    # ---- Plain-text fallback ----
-    def text_section(label: str, rows: list[dict], render) -> str:
-        body = "\n".join(render(r) for r in rows) if rows else "  (nothing new today)"
-        return f"\n=== {label} ({len(rows)}) ===\n{body}\n"
-
-    text_parts = [
-        f"Good morning, Fey — call list for {today_str}.\n"
-        f"{len(memberships)} membership opps · {len(sleeping)} sleeping · {len(missed)} missed calls.\n",
+    # Plain-text fallback
+    total = sum(counts.values())
+    text_lines = [
+        f"Good morning, Fey — {today_str}.",
+        "",
+        f"Your call list: {counts['missed']} missed calls, "
+        f"{counts['membership']} membership opps, {counts['sleeping']} sleeping customers ({total} total).",
     ]
-    text_parts.append(text_section(
-        "MISSED CALLS (last 24h)", missed,
-        lambda r: (
-            f"- {fmt_phone(r.get('phone'))}  "
-            f"{(r.get('customer_name') or 'Unknown'):28s}  "
-            f"{r['call_type']:9s}  {r['received_on']:%-I:%M%p %a} "
-            + (f"  lifetime {fmt_money(r.get('lifetime_revenue'))}" if r.get('customer_id') else "  (new lead)")
-        ),
-    ))
-    text_parts.append(text_section(
-        "MEMBERSHIP OPPORTUNITIES (installs last 14d, no plan)", memberships,
-        lambda r: (
-            f"- {fmt_phone(r.get('phone'))}  "
-            f"{(r.get('customer_name') or '?')[:32]:32s}  "
-            f"{fmt_money(r['install_value'])} install {days_ago(r['install_date']):>10s}  "
-            f"lifetime {fmt_money(r.get('lifetime_revenue'))}"
-        ),
-    ))
-    text_parts.append(text_section(
-        "SLEEPING CUSTOMERS (top 15 by lifetime value)", sleeping,
-        lambda r: (
-            f"- {fmt_phone(r.get('phone'))}  "
-            f"{(r.get('customer_name') or '?')[:32]:32s}  "
-            f"last {days_ago(r['last_visit']):>10s}  "
-            f"loyal spend {fmt_money(r.get('loyal_revenue'))}"
-        ),
-    ))
-    text = "\n".join(text_parts)
+    if hot_leads:
+        text_lines.append("")
+        text_lines.append("HOT LEADS — call these first:")
+        for h in hot_leads[:5]:
+            text_lines.append(f"  · {h['customer_name']} ({h['kind']})")
+    if _CALL_LIST_URL:
+        text_lines.append("")
+        text_lines.append(f"Open your live call list: {_CALL_LIST_URL}/Call_List")
+    text_body = "\n".join(text_lines)
 
-    # ---- Send ----
+    # ---- Build + send the email ----
+    _fey_list = parse_recipients(os.environ.get("FEY_EMAIL_TO"))
+    _brett_list = parse_recipients(os.environ.get("EMAIL_TO"))
+    if _fey_list:
+        TO_LIST = _fey_list
+        CC_LIST = exclude(_brett_list, _fey_list)
+    else:
+        TO_LIST = _brett_list
+        CC_LIST = []
+    if not TO_LIST:
+        print("No recipients configured — skipping send.")
+        return 0
+
+    subject = f"📞 Call list ready ({total}) — {today_str}"
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = os.environ.get("EMAIL_FROM") or os.environ["SMTP_USER"]
     msg["To"] = fmt_recipients(TO_LIST)
     if CC_LIST:
         msg["Cc"] = fmt_recipients(CC_LIST)
-    msg.set_content(text)
-    msg.add_alternative(html, subtype="html")
+    msg.set_content(text_body)
+    msg.add_alternative(html_body, subtype="html")
 
     all_recipients = TO_LIST + CC_LIST
-    print(f"Sending to {fmt_recipients(all_recipients)}…")
+    print(f"Sending notification to {fmt_recipients(all_recipients)}…")
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context()) as smtp:
         smtp.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
         smtp.send_message(msg, to_addrs=all_recipients)
     print("Sent.")
+
     with db() as conn:
         record_send(conn, "csr_daily", all_recipients)
 
-    # Record today's batch AFTER the email successfully sends, so suppression
-    # only kicks in for recommendations that actually reached the inbox.
+    # Record today's recommendations so the page's "Pending Xd" badges and
+    # suppression work properly tomorrow. CSR_DRY_RUN bypasses for local
+    # testing without polluting suppression state.
     log_rows: list[tuple] = []
     for r in memberships:
         cid = r.get("customer_id")
@@ -1142,12 +1060,6 @@ def main() -> int:
                          json.dumps({"customer_name": r.get("customer_name"),
                                      "call_type": r.get("call_type"),
                                      "received_on": str(r.get("received_on") or "")})))
-    # Always record in production — cron-job.org now triggers the workflow
-    # via the GitHub API as a workflow_dispatch event, so we can no longer
-    # treat workflow_dispatch as "test only." For local testing without
-    # polluting the suppression log, set CSR_DRY_RUN=1 in the environment.
-    # If real pollution happens, the "Clear CSR recommendation cooldown"
-    # workflow can wipe recent rows in one click.
     is_dry_run = os.environ.get("CSR_DRY_RUN", "").lower() in ("1", "true", "yes")
     if log_rows and not is_dry_run:
         with db() as conn:

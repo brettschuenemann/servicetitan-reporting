@@ -249,6 +249,18 @@ CREATE TABLE IF NOT EXISTS csr_customer_outcomes (
 CREATE INDEX IF NOT EXISTS ix_csr_out_dedup_key ON csr_customer_outcomes(dedup_key);
 CREATE INDEX IF NOT EXISTS ix_csr_out_recorded  ON csr_customer_outcomes(recorded_at DESC);
 
+-- Free-text notes Fey writes during/after a call. Customer-level (not
+-- per-recommendation) so context carries forward if the same customer
+-- appears on multiple lists over time.
+CREATE TABLE IF NOT EXISTS csr_customer_notes (
+    id           BIGSERIAL PRIMARY KEY,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    customer_id  BIGINT NOT NULL,
+    note         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_csr_notes_customer ON csr_customer_notes(customer_id);
+CREATE INDEX IF NOT EXISTS ix_csr_notes_created  ON csr_customer_notes(created_at DESC);
+
 -- Tracks every successful email send so retry crons can skip when the
 -- primary fire already succeeded. Manual workflow_dispatch runs always
 -- send (no dedup) — they're explicit and the operator knows what they want.
