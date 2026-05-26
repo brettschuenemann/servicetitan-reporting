@@ -19,7 +19,7 @@ apply_mobile_styles()
 require_password()
 st.title("Followups — unsold estimates")
 st.caption(
-    "Estimates with status **Open** (customer hasn't decided). Sorted by age."
+    "Estimates with status **Open** (customer hasn't decided). Newest first."
 )
 
 
@@ -59,7 +59,7 @@ def load_open_estimates() -> pd.DataFrame:
                 LEFT JOIN jobs j       ON j.id = e.job_id
                 LEFT JOIN campaigns c  ON c.id = j.campaign_id
                 WHERE e.status_name = 'Open' AND e.active = TRUE
-                ORDER BY e.created_on ASC
+                ORDER BY e.created_on DESC
                 """
             )
             rows = cur.fetchall()
