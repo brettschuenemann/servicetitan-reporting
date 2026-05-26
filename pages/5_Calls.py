@@ -128,7 +128,7 @@ if not csr_inbound.empty:
         )
         .assign(
             bookable=lambda d: d["booked"] + d["unbooked"] + d["abandoned"],
-            book_rate=lambda d: (d["booked"] / d["bookable"].replace(0, pd.NA) * 100).round(1),
+            book_rate=lambda d: (d["booked"] / d["bookable"].replace(0, float("nan")) * 100).round(1),
         )
         .sort_values("total", ascending=False)
     )

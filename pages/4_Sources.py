@@ -104,7 +104,7 @@ agg = (
         jobs_paid=("invoice_total", lambda s: int((s > 0).sum())),
     )
     .assign(
-        avg_paid=lambda d: (d["revenue"] / d["jobs_paid"].replace(0, pd.NA)).round(2),
+        avg_paid=lambda d: (d["revenue"] / d["jobs_paid"].replace(0, float("nan"))).round(2),
         conversion=lambda d: (d["jobs_paid"] / d["jobs"] * 100).round(1),
     )
     .sort_values("revenue", ascending=False)

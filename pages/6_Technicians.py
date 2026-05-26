@@ -110,7 +110,7 @@ agg = (
         revenue=("invoice_total", "sum"),
     )
     .assign(
-        avg_paid_ticket=lambda d: (d["revenue"] / d["paid_jobs"].replace(0, pd.NA)).round(2),
+        avg_paid_ticket=lambda d: (d["revenue"] / d["paid_jobs"].replace(0, float("nan"))).round(2),
         conversion=lambda d: (d["paid_jobs"] / d["jobs"] * 100).round(1),
         revenue_per_day=lambda d: (d["revenue"] / days_in_range).round(2),
     )

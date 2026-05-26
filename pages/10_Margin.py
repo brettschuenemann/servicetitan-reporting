@@ -169,7 +169,7 @@ if per_inv.empty:
 
 # Compute per-invoice margin
 per_inv["gross_profit"] = per_inv["revenue"] - per_inv["cogs"]
-per_inv["margin_pct"] = (per_inv["gross_profit"] / per_inv["revenue"].replace(0, pd.NA)) * 100
+per_inv["margin_pct"] = (per_inv["gross_profit"] / per_inv["revenue"].replace(0, float("nan"))) * 100
 
 # Three buckets for diagnostics:
 #   has_cost      → at least one line has a positive cost → real margin number
@@ -278,7 +278,7 @@ monthly = (
     .agg(revenue=("revenue", "sum"), cogs=("cogs", "sum"))
 )
 monthly["gross_profit"] = monthly["revenue"] - monthly["cogs"]
-monthly["margin_pct"] = (monthly["gross_profit"] / monthly["revenue"].replace(0, pd.NA)) * 100
+monthly["margin_pct"] = (monthly["gross_profit"] / monthly["revenue"].replace(0, float("nan"))) * 100
 
 if len(monthly) > 1:
     fig = go.Figure()
@@ -324,7 +324,7 @@ with col_bu:
     )
     if not bu_df.empty:
         bu_df["gross_profit"] = bu_df["revenue"] - bu_df["cogs"]
-        bu_df["margin_pct"] = (bu_df["gross_profit"] / bu_df["revenue"].replace(0, pd.NA)) * 100
+        bu_df["margin_pct"] = (bu_df["gross_profit"] / bu_df["revenue"].replace(0, float("nan"))) * 100
         bu_df = bu_df.sort_values("revenue", ascending=False)
         display = bu_df.rename(
             columns={
@@ -348,7 +348,7 @@ with col_type:
     st.subheader("Margin by item type")
     if not by_type.empty:
         by_type["gross_profit"] = by_type["revenue"] - by_type["cogs"]
-        by_type["margin_pct"] = (by_type["gross_profit"] / by_type["revenue"].replace(0, pd.NA)) * 100
+        by_type["margin_pct"] = (by_type["gross_profit"] / by_type["revenue"].replace(0, float("nan"))) * 100
         display = by_type.rename(
             columns={
                 "item_type": "Type",
