@@ -433,7 +433,7 @@ footer {{ visibility: hidden !important; height: 0 !important; }}
   display: flex;
   align-items: center;
   gap: 0.85rem;
-  padding: 0.5rem 0 1.25rem 0;
+  padding: 1rem 0 1.25rem 0;
   margin-bottom: 1rem;
   border-bottom: 2px solid {NAVY};
 }}
@@ -445,13 +445,15 @@ footer {{ visibility: hidden !important; height: 0 !important; }}
   color: white; font-weight: 800; font-size: 1.05rem;
   letter-spacing: -0.04em;
   box-shadow: 0 2px 6px rgba(0, 102, 238, 0.2);
+  flex-shrink: 0;
 }}
 .pc-header .pc-title {{
   font-size: 1.6rem; font-weight: 800; color: {NAVY};
-  letter-spacing: -0.025em; line-height: 1;
+  letter-spacing: -0.025em; line-height: 1.2;
 }}
 .pc-header .pc-subtitle {{
   font-size: 0.88rem; color: {MUTED}; margin-top: 0.2rem;
+  line-height: 1.4;
 }}
 
 /* ========== Empty-state card ========== */
@@ -468,7 +470,7 @@ footer {{ visibility: hidden !important; height: 0 !important; }}
 /* ========== Mobile overrides ========== */
 @media (max-width: 768px) {{
   .block-container {{
-    padding-top: 0.75rem !important;
+    padding-top: 1.5rem !important;
     padding-bottom: 1rem !important;
     padding-left: 0.75rem !important;
     padding-right: 0.75rem !important;
@@ -488,7 +490,7 @@ footer {{ visibility: hidden !important; height: 0 !important; }}
 }}
 
 @media (min-width: 769px) {{
-  .block-container {{ padding-top: 1.5rem; max-width: 1280px; }}
+  .block-container {{ padding-top: 2.5rem; max-width: 1280px; }}
 }}
 </style>
 """
