@@ -19,8 +19,7 @@ apply_mobile_styles()
 require_password()
 st.title("Followups — unsold estimates")
 st.caption(
-    "Estimates with status **Open** (customer hasn't decided). Sorted by age. "
-    "Click a customer or estimate ID to look it up in ServiceTitan."
+    "Estimates with status **Open** (customer hasn't decided). Sorted by age."
 )
 
 
@@ -120,8 +119,6 @@ display = filtered.assign(
         "age_days": "Age (days)",
         "created": "Created",
         "business_unit_name": "Business unit",
-        "job_number": "Job #",
-        "id": "Estimate ID",
     }
 )[
     [
@@ -132,8 +129,6 @@ display = filtered.assign(
         "Business unit",
         "Estimate",
         "Summary",
-        "Job #",
-        "Estimate ID",
     ]
 ]
 st.dataframe(display, use_container_width=True, hide_index=True, height=480)
