@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import Callable, Optional
 
@@ -142,17 +143,81 @@ Return ONLY valid JSON with this exact shape:
 """
 
 
+# ---------- tech filtering ----------
+# Internal calls (CSR ↔ tech, tech-to-customer with no CSR involved, etc.)
+# shouldn't be scored against the CSR rubric — different dynamics. We pull
+# the active technician roster from ST once per cron run and exclude any
+# call where:
+#   - inbound: from_phone matches a tech's phone   (tech calling in)
+#   - outbound: to_phone matches a tech's phone    (CSR dialing a tech)
+#   - any direction: agent_name matches a tech     (tech-mediated call)
+
+
+def _normalize_phone(s) -> str:
+    """Strip to last 10 digits, drop country code + formatting."""
+    digits = re.sub(r"\D", "", str(s or ""))
+    return digits[-10:] if len(digits) >= 10 else digits
+
+
+def _normalize_name(s) -> str:
+    """First word, lowercase — matches how tech names usually appear in
+    agent_name on calls (e.g. 'Bud Smith' → 'bud', 'Peter' → 'peter')."""
+    s = (s or "").strip()
+    if not s:
+        return ""
+    return s.split()[0].lower()
+
+
+def load_tech_filters(st_client: ServiceTitanClient) -> tuple[list[str], list[str]]:
+    """Pull active technicians from ST and build (phones, first_names) lists.
+
+    Both lists are normalized for downstream matching:
+      - phones: last 10 digits, no formatting
+      - names: first word, lowercase
+    """
+    techs = st_client.get_technicians()
+    phones: set[str] = set()
+    names: set[str] = set()
+    for t in techs:
+        if not t.get("active"):
+            continue
+        for fld in ("phoneNumber", "mobilePhone", "outboundCallerId"):
+            n = _normalize_phone(t.get(fld))
+            if len(n) == 10:
+                phones.add(n)
+        nm = _normalize_name(t.get("name") or t.get("firstName"))
+        if nm:
+            names.add(nm)
+    return sorted(phones), sorted(names)
+
+
 # ---------- pipeline steps ----------
 
-def find_unscored_calls(conn, limit: int = DEFAULT_BATCH_LIMIT) -> list[dict]:
+def find_unscored_calls(
+    conn,
+    limit: int = DEFAULT_BATCH_LIMIT,
+    exclude_phones: Optional[list[str]] = None,
+    exclude_names: Optional[list[str]] = None,
+) -> list[dict]:
     """Calls with a recording but no score yet, within LOOKBACK_DAYS.
 
-    Skips < MIN_DURATION_SECONDS (not worth coaching) and abandoned calls
-    (no recording exists for those — they hung up before pickup).
+    Filters out tech-related calls via SQL (no wasted fetches):
+      - Inbound from_phone matching a tech                → skip
+      - Outbound to_phone matching a tech                 → skip
+      - Any direction where agent_name's first word
+        matches an active tech                            → skip
+
+    Skips short calls (< MIN_DURATION_SECONDS) and abandoned ones
+    (no recording exists for those — caller hung up before pickup).
     """
+    # Postgres ARRAY can't be empty for ANY() comparison reliably across
+    # versions — pass a sentinel non-match so the clause is always valid.
+    phones = list(exclude_phones) if exclude_phones else ["__none__"]
+    names = list(exclude_names) if exclude_names else ["__none__"]
+
     with conn.cursor() as cur:
         cur.execute(
-            """
+            r"""
             SELECT c.id, c.direction, c.call_type, c.duration_seconds,
                    c.agent_name, c.customer_name, c.received_on
             FROM calls c
@@ -161,10 +226,27 @@ def find_unscored_calls(conn, limit: int = DEFAULT_BATCH_LIMIT) -> list[dict]:
               AND c.duration_seconds >= %s
               AND c.received_on >= NOW() - (%s || ' day')::interval
               AND s.call_id IS NULL
+              -- exclude inbound calls from a tech's phone
+              AND NOT (
+                c.direction = 'Inbound'
+                AND RIGHT(REGEXP_REPLACE(COALESCE(c.from_phone, ''), '\D', '', 'g'), 10)
+                    = ANY(%s)
+              )
+              -- exclude outbound calls to a tech's phone
+              AND NOT (
+                c.direction = 'Outbound'
+                AND RIGHT(REGEXP_REPLACE(COALESCE(c.to_phone, ''), '\D', '', 'g'), 10)
+                    = ANY(%s)
+              )
+              -- exclude calls where the agent is a tech (e.g. Bud's outbound)
+              AND NOT (
+                LOWER(SPLIT_PART(TRIM(COALESCE(c.agent_name, '')), ' ', 1))
+                    = ANY(%s)
+              )
             ORDER BY c.received_on DESC
             LIMIT %s
             """,
-            (MIN_DURATION_SECONDS, LOOKBACK_DAYS, limit),
+            (MIN_DURATION_SECONDS, LOOKBACK_DAYS, phones, phones, names, limit),
         )
         return [dict(r) for r in cur.fetchall()]
 
@@ -304,9 +386,22 @@ def score_calls_batch(
 ) -> dict:
     """Find unscored calls, download + transcribe + score each one.
 
+    Filters out internal CSR ↔ tech calls and tech-mediated customer
+    calls before scoring (different coaching dynamics; not what the
+    CSR rubric was designed for).
+
     Returns {scored: N, errors: N, attempted: N, cost_usd: float}.
     """
-    pending = find_unscored_calls(conn, limit=limit)
+    tech_phones, tech_names = load_tech_filters(st_client)
+    progress(
+        f"Tech filter loaded: {len(tech_phones)} phones, "
+        f"{len(tech_names)} names — calls matching these will be skipped"
+    )
+
+    pending = find_unscored_calls(
+        conn, limit=limit,
+        exclude_phones=tech_phones, exclude_names=tech_names,
+    )
     progress(f"Found {len(pending)} unscored calls (≥{MIN_DURATION_SECONDS}s, ≤{LOOKBACK_DAYS}d old)")
 
     scored = 0
