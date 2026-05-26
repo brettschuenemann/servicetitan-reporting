@@ -2,12 +2,14 @@ name: Weekly AI summary email
 
 on:
   schedule:
-    # Fridays — primary + retry 1h later. GitHub's free-tier cron is best-
-    # effort and occasionally skips. The script's idempotency guard skips
-    # its work if a successful send was logged in the last 6h, so the
-    # retry is a no-op when the primary succeeded.
-    - cron: '0 13 * * 5'   # Fri 8 AM ET standard / 9 AM EDT (primary)
-    - cron: '0 14 * * 5'   # Fri 9 AM ET standard / 10 AM EDT (retry)
+    # Friday EVENING — primary + retry 1h later. GitHub's free-tier cron
+    # is best-effort and occasionally skips; the second fire is a safety
+    # net. The script's idempotency guard skips its work if a successful
+    # send was logged in the last 6h, so the retry is a no-op when the
+    # primary succeeded.
+    # 22:00 UTC = 5 PM CDT (most of year) / 4 PM CST (Nov–Mar).
+    - cron: '0 22 * * 5'   # Fri 5 PM CDT (primary)
+    - cron: '0 23 * * 5'   # Fri 6 PM CDT (retry)
   workflow_dispatch:   # manual "Run workflow" from the Actions tab
 
 jobs:

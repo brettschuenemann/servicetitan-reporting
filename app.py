@@ -14,7 +14,7 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from lib.ai_summary import SUMMARY_DAYS, generate_summary
+from lib.ai_summary import SUMMARY_DAYS
 from lib.auth import require_password
 from lib.database import db
 from lib.style import apply_mobile_styles, chart_height, page_header
@@ -83,26 +83,40 @@ if _sync_clicked:
 
 st.divider()
 
-# ---------- AI summary (top of page, independent of date filter) ----------
-_summary_today = date.today().isoformat()
-_summary_header, _summary_button = st.columns([4, 1])
-with _summary_header:
-    st.subheader(f"AI summary — last {SUMMARY_DAYS} days")
-with _summary_button:
-    if st.button("Refresh", use_container_width=True, help="Force a new summary now"):
-        generate_summary.clear()
-
+# ---------- AI summary (read-only — regenerated Friday evenings by cron) ----------
+# Display the most recent stored summary from `ai_summaries`. No on-the-fly
+# generation, no refresh button — the weekly cron is the only path that
+# creates new summaries. Each generation costs ~$0.05 in Claude tokens
+# and a 15-30s API call; keeping that off the page-load path makes the
+# home page fast and predictable.
+st.subheader(f"AI summary — last {SUMMARY_DAYS} days")
 try:
-    with st.spinner("Generating summary with Claude…"):
-        _summary_md, _summary_brief = generate_summary(_summary_today)
-    with st.container(border=True):
-        st.markdown(_summary_md)
-    with st.expander("Show the raw data Claude saw"):
-        st.code(_summary_brief, language="text")
-except RuntimeError as exc:
-    st.info(f"⚙️ AI summary disabled: {exc}")
+    with db() as _conn, _conn.cursor() as _cur:
+        _cur.execute(
+            "SELECT generated_at, summary_md, raw_brief "
+            "FROM ai_summaries ORDER BY generated_at DESC LIMIT 1"
+        )
+        _summary_row = _cur.fetchone()
+    if _summary_row:
+        _gen_at = _summary_row["generated_at"]
+        st.caption(
+            f"Generated {_gen_at:%a %b %d at %-I:%M %p UTC}. "
+            "Regenerates automatically every Friday evening."
+        )
+        # Streamlit's markdown treats unescaped `$...$` pairs as LaTeX math.
+        # The DB stores the raw markdown, so escape for display only.
+        _summary_md = (_summary_row["summary_md"] or "").replace("$", r"\$")
+        with st.container(border=True):
+            st.markdown(_summary_md)
+        with st.expander("Show the raw data Claude saw"):
+            st.code(_summary_row["raw_brief"] or "", language="text")
+    else:
+        st.info(
+            "No AI summary has been generated yet. The first one will land "
+            "after the weekly cron fires on Friday evening."
+        )
 except Exception as exc:
-    st.warning(f"Couldn't generate AI summary: {exc}")
+    st.warning(f"Couldn't load AI summary: {exc}")
 
 st.divider()
 
