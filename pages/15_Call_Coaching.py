@@ -21,6 +21,7 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.auth import require_password
+from lib.call_coaching import compute_conversion_stats
 from lib.coaching_insights import build_insights, load_latest_insights
 from lib.database import db
 from lib.style import apply_mobile_styles, empty_state
@@ -229,6 +230,64 @@ def _render_audience(audience: str, label: str, positive_label: str) -> None:
                     f"call {row['call_id']} ({row['agent_name'] or '—'}, "
                     f"{row['duration_seconds']}s): {row['error']}"
                 )
+
+    st.divider()
+
+    # ---------- conversion impact ----------
+    # For each inbound call with a matched customer_id, did a paid invoice
+    # appear within 30 days? Anonymous callers (no customer_id) are
+    # excluded from the denominator — we surface that gap separately.
+    st.markdown(f"### 📈 Conversion impact — {label}")
+    st.caption(
+        "Of customer-matched inbound calls in the last 60 days, what "
+        "fraction led to a paid invoice within 30 days? Anonymous callers "
+        "(no customer_id matched) are excluded from the denominator."
+    )
+
+    with db() as _conn:
+        own_conv = compute_conversion_stats(_conn, audience=audience,
+                                            lookback_days=60, attribution_days=30)
+        other_aud = "csr" if audience == "after_hours" else "after_hours"
+        other_conv = compute_conversion_stats(_conn, audience=other_aud,
+                                              lookback_days=60, attribution_days=30)
+
+    cv1, cv2, cv3, cv4 = st.columns(4)
+    cv1.metric(
+        "Conversion rate",
+        f"{100 * own_conv['conversion_rate']:.0f}%",
+        help=f"{own_conv['converted_calls']} of {own_conv['matched_calls']} "
+             f"customer-matched calls led to a paid invoice within 30d",
+    )
+    cv2.metric(
+        "Attributed revenue",
+        f"${own_conv['attributed_revenue']:,.0f}",
+        help="Sum of paid-invoice totals within 30d of a customer-matched call",
+    )
+    cv3.metric(
+        "Revenue per matched call",
+        f"${own_conv['revenue_per_matched_call']:,.0f}",
+        help="Average attributed revenue per matched inbound call",
+    )
+    cv4.metric(
+        "Customer-match rate",
+        f"{100 * own_conv['match_rate']:.0f}%",
+        help=f"{own_conv['matched_calls']} of {own_conv['total_inbound']} inbound calls "
+             "matched to a known ST customer. The rest are anonymous (we can't "
+             "attribute their downstream revenue without phone-match lookup)",
+    )
+
+    # Side-by-side comparison
+    if other_conv["matched_calls"] > 0:
+        other_label = "Daytime CSR" if other_aud == "csr" else "After-hours"
+        delta_conv = own_conv["conversion_rate"] - other_conv["conversion_rate"]
+        delta_rev = own_conv["revenue_per_matched_call"] - other_conv["revenue_per_matched_call"]
+        st.caption(
+            f"**vs {other_label}:** "
+            f"conversion {100 * other_conv['conversion_rate']:.0f}% "
+            f"(this is {'+' if delta_conv >= 0 else ''}{100 * delta_conv:.0f}pp) · "
+            f"revenue/call ${other_conv['revenue_per_matched_call']:,.0f} "
+            f"(this is {'+' if delta_rev >= 0 else ''}${delta_rev:,.0f})"
+        )
 
     st.divider()
 

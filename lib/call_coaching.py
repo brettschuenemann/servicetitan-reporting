@@ -260,6 +260,97 @@ def _normalize_name(s) -> str:
     return s.split()[0].lower()
 
 
+def compute_conversion_stats(
+    conn,
+    audience: str = "after_hours",
+    lookback_days: int = 60,
+    attribution_days: int = 30,
+) -> dict:
+    """How effective is this audience at converting calls into paid invoices?
+
+    For each inbound, customer-matched call in `audience` over the last
+    `lookback_days`, check whether the customer had a paid invoice within
+    `attribution_days` after the call. Returns the conversion rate, the
+    attributed revenue, and the revenue per matched call.
+
+    Calls with no customer_id (truly anonymous callers) are excluded from
+    the denominator — we can't attribute their downstream activity without
+    a phone-match lookup. The 'matched_rate' field surfaces that gap.
+    """
+    with conn.cursor() as cur:
+        # Total inbound (denominator ceiling) + how many we can attribute
+        cur.execute(
+            """
+            SELECT
+              COUNT(*)                                AS total_inbound,
+              COUNT(c.customer_id)                    AS matched
+            FROM calls c JOIN call_scores s ON s.call_id = c.id
+            WHERE s.audience = %s
+              AND c.direction = 'Inbound'
+              AND c.received_on >= NOW() - (%s || ' day')::interval
+              AND s.error IS NULL
+            """,
+            (audience, lookback_days),
+        )
+        coverage = dict(cur.fetchone())
+
+        # Conversion among matched calls
+        cur.execute(
+            """
+            WITH attribution AS (
+              SELECT c.id,
+                EXISTS (
+                  SELECT 1 FROM invoices i
+                  WHERE i.customer_id = c.customer_id
+                    AND i.invoice_date >= (c.received_on AT TIME ZONE 'UTC')::date
+                    AND i.invoice_date <  (c.received_on AT TIME ZONE 'UTC')::date
+                                          + (%s || ' day')::interval
+                    AND i.total > 0
+                ) AS converted,
+                COALESCE((
+                  SELECT SUM(i.total) FROM invoices i
+                  WHERE i.customer_id = c.customer_id
+                    AND i.invoice_date >= (c.received_on AT TIME ZONE 'UTC')::date
+                    AND i.invoice_date <  (c.received_on AT TIME ZONE 'UTC')::date
+                                          + (%s || ' day')::interval
+                    AND i.total > 0
+                ), 0) AS revenue
+              FROM calls c JOIN call_scores s ON s.call_id = c.id
+              WHERE s.audience = %s
+                AND c.direction = 'Inbound'
+                AND c.received_on >= NOW() - (%s || ' day')::interval
+                AND s.error IS NULL
+                AND c.customer_id IS NOT NULL
+            )
+            SELECT
+              COUNT(*) FILTER (WHERE converted) AS converted_count,
+              COALESCE(SUM(revenue), 0) AS total_revenue
+            FROM attribution
+            """,
+            (attribution_days, attribution_days, audience, lookback_days),
+        )
+        result = dict(cur.fetchone())
+
+    matched = coverage["matched"] or 0
+    total = coverage["total_inbound"] or 0
+    converted = result["converted_count"] or 0
+    revenue = float(result["total_revenue"] or 0)
+
+    return {
+        "audience": audience,
+        "lookback_days": lookback_days,
+        "attribution_days": attribution_days,
+        "total_inbound": total,
+        "matched_calls": matched,
+        "match_rate": (matched / total) if total else 0,
+        "converted_calls": converted,
+        "conversion_rate": (converted / matched) if matched else 0,
+        "attributed_revenue": revenue,
+        "revenue_per_matched_call": (revenue / matched) if matched else 0,
+        "revenue_per_inbound_call": (revenue / total) if total else 0,
+    }
+
+
 def load_tech_filters(st_client: ServiceTitanClient) -> tuple[list[str], list[str]]:
     """Pull active technicians from ST and build (phones, first_names) lists.
 
