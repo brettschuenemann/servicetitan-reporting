@@ -98,6 +98,19 @@ def _to_central(ts):
         return ts
 
 
+def _safe(v, default: str = "—") -> str:
+    """Pandas-safe stringification for escape().
+
+    Critical for any value coming out of a DataFrame: `row[col] or default`
+    fails when the value is NaN (NaN is truthy → returns NaN → not a str
+    → escape() crashes calling .replace()). Use this helper instead.
+    """
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return default
+    s = str(v).strip()
+    return s if s else default
+
+
 # ---------- header ----------
 
 st.title("🎧 Call Coaching")
@@ -226,37 +239,40 @@ else:
             with head_r:
                 st.markdown(
                     f"<div style='font-size:15px;font-weight:600;color:#111;margin-bottom:4px'>"
-                    f"{escape(row['agent_name'] or '—')} → "
-                    f"{escape(row['customer_name'] or 'Unknown')}"
+                    f"{escape(_safe(row['agent_name']))} → "
+                    f"{escape(_safe(row['customer_name'], 'Unknown'))}"
                     f"{(' ' + verdict_html) if verdict_html else ''}</div>"
                     f"<div style='font-size:12px;color:#6B7280'>"
-                    f"{escape(row['direction'] or '—')} · "
-                    f"{escape(row['call_type'] or '—')} · "
-                    f"{row['duration_seconds']}s · {escape(when)}</div>",
+                    f"{escape(_safe(row['direction']))} · "
+                    f"{escape(_safe(row['call_type']))} · "
+                    f"{int(row['duration_seconds']) if pd.notna(row['duration_seconds']) else '—'}s · "
+                    f"{escape(when or '—')}</div>",
                     unsafe_allow_html=True,
                 )
 
             # Key insight: KEY MISS + NEXT TIME
-            if row["key_miss"]:
+            key_miss = _safe(row["key_miss"], "")
+            if key_miss:
                 st.markdown(
                     f"<div style='margin-top:10px;padding:10px 12px;"
                     f"background:#FEF3C7;border-left:3px solid #F59E0B;"
                     f"border-radius:4px;font-size:13px;color:#78350F'>"
-                    f"<b>📍 Key miss</b> — {escape(row['key_miss'])}</div>",
+                    f"<b>📍 Key miss</b> — {escape(key_miss)}</div>",
                     unsafe_allow_html=True,
                 )
-            if row["next_time"]:
+            next_time = _safe(row["next_time"], "")
+            if next_time:
                 st.markdown(
                     f"<div style='margin-top:6px;padding:10px 12px;"
                     f"background:#DBEAFE;border-left:3px solid #0066EE;"
                     f"border-radius:4px;font-size:13px;color:#1E3A8A'>"
-                    f"<b>💡 Next time</b> — {escape(row['next_time'])}</div>",
+                    f"<b>💡 Next time</b> — {escape(next_time)}</div>",
                     unsafe_allow_html=True,
                 )
 
             # Detail expander
             with st.expander("Show dimensions, wins, transcript"):
-                dims = row["dimensions"] or {}
+                dims = row["dimensions"] if isinstance(row["dimensions"], dict) else {}
                 if dims:
                     st.markdown("**Dimensions**")
                     for name, info in dims.items():
@@ -270,28 +286,30 @@ else:
                             f"{s or '—'}/10</div>"
                             f"<div style='font-size:11px;color:#6B7280;"
                             f"margin-left:14px;margin-bottom:6px'>"
-                            f"<i>{escape(ev)}</i></div>",
+                            f"<i>{escape(_safe(ev, ''))}</i></div>",
                             unsafe_allow_html=True,
                         )
 
-                wins = row["wins"] or []
+                wins = row["wins"] if isinstance(row["wins"], list) else []
                 if wins:
                     st.markdown("**Wins**")
                     for w in wins:
-                        st.markdown(f"- {escape(str(w))}")
+                        st.markdown(f"- {escape(_safe(w, ''))}")
 
-                if row["coaching_summary"]:
+                coaching_summary = _safe(row["coaching_summary"], "")
+                if coaching_summary:
                     st.markdown("**Coaching summary**")
                     st.markdown(
                         f"<div style='padding:8px 12px;background:#F8FAFC;"
                         f"border-radius:6px;font-size:13px;color:#0F172A'>"
-                        f"{escape(row['coaching_summary'])}</div>",
+                        f"{escape(coaching_summary)}</div>",
                         unsafe_allow_html=True,
                     )
 
-                if row["transcript"]:
+                transcript = _safe(row["transcript"], "")
+                if transcript:
                     st.markdown("**Transcript**")
-                    st.code(row["transcript"], language="text")
+                    st.code(transcript, language="text")
 
 # ---------- agent rollup ----------
 
