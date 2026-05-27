@@ -347,10 +347,35 @@ def load_ppc_customer_attribution() -> tuple[pd.DataFrame, dict]:
                 cust_name AS (
                   SELECT customer_id, MIN(customer_name) AS name
                     FROM invoices WHERE customer_name IS NOT NULL GROUP BY customer_id
+                ),
+                -- Roll up every PPC job's status into a single per-customer
+                -- value matching the statuses ST uses on the per-job table
+                -- above. Priority order: future work > current work >
+                -- historical completed > stalled > all-cancelled > unknown.
+                -- The cell answers "where is this customer right now?" so
+                -- an active Scheduled wins over a long-ago Completed.
+                ppc_status AS (
+                  SELECT
+                    j.customer_id,
+                    CASE
+                      WHEN COUNT(*) FILTER (WHERE j.job_status = 'Scheduled')        > 0 THEN 'Scheduled'
+                      WHEN COUNT(*) FILTER (WHERE j.job_status
+                           IN ('InProgress','Working','Dispatched'))                  > 0 THEN 'InProgress'
+                      WHEN COUNT(*) FILTER (WHERE j.job_status = 'Completed')        > 0 THEN 'Completed'
+                      WHEN COUNT(*) FILTER (WHERE j.job_status = 'Hold')             > 0 THEN 'Hold'
+                      WHEN COUNT(*) FILTER (WHERE j.job_status
+                           IN ('Cancelled','Canceled'))                               > 0 THEN 'Canceled'
+                      ELSE 'Open'
+                    END AS status
+                  FROM jobs j JOIN campaigns c ON c.id = j.campaign_id
+                  WHERE c.name = 'Pay Per Click (PPC)'
+                    AND j.customer_id IS NOT NULL
+                  GROUP BY j.customer_id
                 )
                 SELECT
                   i.customer_id,
                   COALESCE(cn.name, 'Customer ' || i.customer_id::text) AS customer,
+                  COALESCE(ps.status, 'Open')           AS status,
                   COUNT(*)                              AS invoices,
                   SUM(i.total)                          AS revenue,
                   MIN(i.invoice_date)                   AS first_invoice,
@@ -359,9 +384,10 @@ def load_ppc_customer_attribution() -> tuple[pd.DataFrame, dict]:
                 FROM invoices i
                 JOIN ppc_first p ON p.customer_id = i.customer_id
                 LEFT JOIN cust_name cn ON cn.customer_id = i.customer_id
+                LEFT JOIN ppc_status ps ON ps.customer_id = i.customer_id
                 WHERE i.invoice_date >= p.first_ppc_at::date
                    OR i.id IN (SELECT id FROM ppc_direct_invoice_ids)
-                GROUP BY i.customer_id, cn.name
+                GROUP BY i.customer_id, cn.name, ps.status
                 ORDER BY revenue DESC NULLS LAST
                 """
             )
@@ -413,22 +439,6 @@ else:
         delta=f"{uplift_pct:+.0f}% on top of direct" if direct_rev else None,
         help="Additional revenue from PPC customers' follow-up invoices, on top of the direct PPC invoices.",
     )
-
-    # Customer-lifecycle status from latest_invoice age (read: "did this
-    # PPC dollar buy a recurring customer or a one-and-done?"). Buckets
-    # match common HVAC retention buckets.
-    _today = pd.Timestamp.today().normalize()
-    _days_since = (_today - pd.to_datetime(by_cust["latest_invoice"])).dt.days
-
-    def _status(days):
-        if pd.isna(days):
-            return "Unknown"
-        if days <= 90:   return "Active"
-        if days <= 180:  return "At risk"
-        if days <= 365:  return "Dormant"
-        return "Lost"
-
-    by_cust["status"] = _days_since.map(_status)
 
     display = by_cust.assign(
         revenue_fmt=lambda d: d["revenue"].map(lambda v: f"${v:,.2f}"),
