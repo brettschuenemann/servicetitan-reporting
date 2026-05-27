@@ -186,9 +186,9 @@ with fc3:
     verdict_filter = st.selectbox("Verdict", verdicts, label_visibility="collapsed")
 
 sort_options = {
+    "Most recent first":                    ("received_on", False),
     "Score: lowest first (needs coaching)": ("overall_score", True),
     "Score: highest first (wins)":          ("overall_score", False),
-    "Most recent first":                    ("received_on", False),
 }
 with fc4:
     sort_key = st.selectbox("Sort", list(sort_options.keys()), label_visibility="collapsed")
