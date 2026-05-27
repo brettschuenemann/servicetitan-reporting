@@ -387,43 +387,6 @@ ALTER TABLE call_scores
   ADD COLUMN IF NOT EXISTS audience TEXT NOT NULL DEFAULT 'csr';
 CREATE INDEX IF NOT EXISTS ix_call_scores_audience ON call_scores(audience);
 
--- Cached per-customer AI pre-brief shown on the Call List card when Fey
--- expands a row. Composed once per customer using their invoice + job
--- history + recent call transcript snippets + notes, then persisted so
--- repeat opens don't re-pay Claude. Regenerated if older than 14 days
--- OR if the customer's invoice/call history has new rows since the
--- last brief.
-CREATE TABLE IF NOT EXISTS customer_pre_briefs (
-    customer_id   BIGINT PRIMARY KEY,
-    brief_md      TEXT NOT NULL,
-    raw_inputs    TEXT,             -- the context blob we sent to Claude
-    generated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    tokens_in     INTEGER,
-    tokens_out    INTEGER
-);
-CREATE INDEX IF NOT EXISTS ix_pre_briefs_generated ON customer_pre_briefs(generated_at DESC);
-
--- Commitments / future-purchase signals mined from call_scores.transcript
--- by a nightly Claude pass. Surfaced on the Call List as the "Things you
--- said you'd do" section above the regular buckets. Dismissible.
--- promise_kind: 'callback_promise' | 'future_purchase' | 'pending_decision'
-CREATE TABLE IF NOT EXISTS call_list_promises (
-    id            BIGSERIAL PRIMARY KEY,
-    call_id       BIGINT NOT NULL REFERENCES call_scores(call_id) ON DELETE CASCADE,
-    customer_id   BIGINT,
-    customer_name TEXT,
-    promise_text  TEXT NOT NULL,    -- the exact mined phrase
-    suggested_action TEXT,           -- the AI's "do this next" hint
-    promise_kind  TEXT NOT NULL DEFAULT 'callback_promise',
-    mined_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    dismissed_at  TIMESTAMPTZ,       -- set when Fey clicks ✓ Done / Couldn't reach
-    expires_at    TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '30 day')
-);
-CREATE INDEX IF NOT EXISTS ix_promises_call ON call_list_promises(call_id);
-CREATE INDEX IF NOT EXISTS ix_promises_customer ON call_list_promises(customer_id);
-CREATE INDEX IF NOT EXISTS ix_promises_active
-  ON call_list_promises(mined_at DESC)
-  WHERE dismissed_at IS NULL;
 """
 
 
