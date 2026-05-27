@@ -154,7 +154,10 @@ def _gather_brief(conn, lookback_days: int = 30, audience: str = "csr") -> tuple
         )
         by_type = [dict(r) for r in cur.fetchall()]
 
-        # Average per dimension (which areas are weakest)
+        # Average per dimension (which areas are weakest).
+        # Guard jsonb_each with `jsonb_typeof = 'object'` so rows whose
+        # dimensions came back as JSON null (rather than SQL NULL) don't
+        # raise 'cannot call jsonb_each on a non-object'.
         cur.execute(
             r"""
             SELECT
@@ -166,7 +169,7 @@ def _gather_brief(conn, lookback_days: int = 30, audience: str = "csr") -> tuple
             WHERE s.error IS NULL
               AND s.audience = %s
               AND c.received_on >= NOW() - (%s || ' day')::interval
-              AND s.dimensions IS NOT NULL
+              AND jsonb_typeof(s.dimensions) = 'object'
               AND (dims.value->>'score') ~ '^-?\d+$'
             GROUP BY key
             ORDER BY avg
@@ -221,12 +224,15 @@ def _gather_brief(conn, lookback_days: int = 30, audience: str = "csr") -> tuple
     }
 
     # Render brief
+    # Audience-appropriate label for the "positive verdict" count
+    positive_label = "Well-handled" if audience == "after_hours" else "Bookable / strong"
+
     lines = [
-        f"PERIOD: last {lookback_days} days",
+        f"PERIOD: last {lookback_days} days · AUDIENCE: {audience}",
         f"",
         f"OVERALL ({overall['n']} scored calls across {overall['agents']} agents)",
         f"  Avg score: {overall['avg']}/10",
-        f"  Bookable / strong: {overall['bookable']} ({100*overall['bookable']//max(overall['n'],1)}%)",
+        f"  {positive_label}: {overall['bookable']} ({100*overall['bookable']//max(overall['n'],1)}%)",
         f"  Weak (<4): {overall['weak']} ({100*overall['weak']//max(overall['n'],1)}%)",
         f"",
         f"PER-AGENT ROLLUP",
@@ -234,7 +240,7 @@ def _gather_brief(conn, lookback_days: int = 30, audience: str = "csr") -> tuple
     for a in agents:
         lines.append(
             f"  {a['agent_name']}: {a['calls']} calls, avg {a['avg']}/10, "
-            f"{a['bookable']} bookable, {a['weak']} weak"
+            f"{a['bookable']} {positive_label.lower()}, {a['weak']} weak"
         )
     lines += ["", "BY CALL TYPE"]
     for r in by_type:
