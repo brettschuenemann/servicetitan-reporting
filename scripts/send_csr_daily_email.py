@@ -142,25 +142,63 @@ _contact_cache: dict[int, tuple[str, str]] = {}
 
 
 def lookup_contact(client: ServiceTitanClient, cid: int | None) -> tuple[str, str]:
-    """Returns (phone, email). Best-effort, per-customer cached for this run."""
+    """Returns (primary_phone, primary_email). Mobile preferred over landline."""
     if not cid:
         return "", ""
     if cid in _contact_cache:
         return _contact_cache[cid]
+    full = fetch_customer_contacts_full(client, cid)
+    out = (full["primary_phone"], full["primary_email"])
+    _contact_cache[cid] = out
+    return out
+
+
+def fetch_customer_contacts_full(client: ServiceTitanClient,
+                                  cid: int | None) -> dict:
+    """Returns the FULL contact picture for a customer:
+
+      {
+        primary_phone:  str,   # best phone (mobile first, then landline)
+        primary_email:  str,   # first email
+        all_phones:     [ {raw, normalized, kind}, ... ]   # every phone
+      }
+
+    `normalized` is the last 10 digits of `raw` (strips country code +
+    formatting). Used by the conversion-analytics phone-match path so a
+    call coming from a non-primary number (spouse, work line, etc) still
+    resolves to the right customer.
+    """
+    if not cid:
+        return {"primary_phone": "", "primary_email": "", "all_phones": []}
     try:
-        contacts = client.get_customer_contacts(cid)
+        contacts = client.get_customer_contacts(cid) or []
     except Exception:
         contacts = []
-    phones = sorted(
+
+    phones_raw = sorted(
         (c for c in contacts
          if c.get("value") and c.get("type") in ("MobilePhone", "Phone")),
         key=lambda c: 0 if c["type"] == "MobilePhone" else 1,
     )
     emails = [c["value"] for c in contacts
               if c.get("value") and c.get("type") == "Email"]
-    out = (phones[0]["value"] if phones else "", emails[0] if emails else "")
-    _contact_cache[cid] = out
-    return out
+
+    all_phones = []
+    seen_normalized = set()
+    for p in phones_raw:
+        raw = str(p.get("value") or "").strip()
+        normalized = "".join(ch for ch in raw if ch.isdigit())[-10:]
+        if len(normalized) != 10 or normalized in seen_normalized:
+            continue
+        seen_normalized.add(normalized)
+        all_phones.append({"raw": raw, "normalized": normalized,
+                           "kind": p.get("type") or ""})
+
+    return {
+        "primary_phone": phones_raw[0]["value"] if phones_raw else "",
+        "primary_email": emails[0] if emails else "",
+        "all_phones": all_phones,
+    }
 
 
 # ---------- data loaders ----------

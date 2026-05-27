@@ -278,6 +278,7 @@ CREATE INDEX IF NOT EXISTS ix_email_sends_kind_sent ON email_sends(kind, sent_at
 -- by the hourly sync for active Call List candidates; lazily filled by
 -- the page for anyone the sync missed. Refresh policy: rows older than
 -- 7 days are re-fetched on next sync.
+-- Single primary phone — used for display ("Tap to call X" buttons).
 CREATE TABLE IF NOT EXISTS customer_contacts (
     customer_id  BIGINT PRIMARY KEY,
     phone        TEXT,
@@ -285,6 +286,23 @@ CREATE TABLE IF NOT EXISTS customer_contacts (
     fetched_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS ix_customer_contacts_fetched ON customer_contacts(fetched_at);
+
+-- ALL phones for a customer — many-to-many. Used by the conversion-
+-- analytics reverse lookup so a customer who called from a non-primary
+-- number (spouse's phone, work line, kid calling about parent's furnace)
+-- still resolves to their customer_id. Populated alongside
+-- customer_contacts in the same sync step.
+-- normalized = last 10 digits of the phone (strips country code +
+-- formatting) so matches survive any phone-string variation.
+CREATE TABLE IF NOT EXISTS customer_phones (
+    customer_id      BIGINT NOT NULL,
+    normalized_phone TEXT   NOT NULL,
+    raw_phone        TEXT,
+    kind             TEXT,
+    fetched_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (customer_id, normalized_phone)
+);
+CREATE INDEX IF NOT EXISTS ix_customer_phones_normalized ON customer_phones(normalized_phone);
 
 -- Persisted openers so we don't pay Claude every time a Streamlit Cloud
 -- container restarts. Keyed by (kind, customer_id, secondary_id) so

@@ -839,13 +839,17 @@ def sync_call_list_contacts(
 
     progress(f"Fetching contacts for {len(to_fetch)} customers (parallel)…")
 
-    # Lazy import so this module stays free of email-script imports
-    from scripts.send_csr_daily_email import lookup_contact
+    # Lazy import to avoid circular deps
+    from scripts.send_csr_daily_email import fetch_customer_contacts_full
 
     with ThreadPoolExecutor(max_workers=12) as ex:
-        fetched = list(ex.map(lambda c: (c, lookup_contact(client, c)), to_fetch))
+        fetched = list(ex.map(
+            lambda c: (c, fetch_customer_contacts_full(client, c)),
+            to_fetch,
+        ))
 
-    progress(f"Persisting {len(fetched)} rows…")
+    # Persist primary phone + email (used for display on Call List / Todo)
+    progress(f"Persisting primary contacts for {len(fetched)} customers…")
     with conn.cursor() as cur:
         execute_values(
             cur,
@@ -854,10 +858,36 @@ def sync_call_list_contacts(
             "  phone = EXCLUDED.phone, "
             "  email = EXCLUDED.email, "
             "  fetched_at = NOW()",
-            [(cid, p, e) for cid, (p, e) in fetched],
+            [(cid, full["primary_phone"], full["primary_email"])
+             for cid, full in fetched],
         )
+
+        # Persist EVERY phone (used by conversion-analytics reverse lookup)
+        phone_rows = []
+        for cid, full in fetched:
+            for p in full["all_phones"]:
+                phone_rows.append(
+                    (cid, p["normalized"], p["raw"], p["kind"])
+                )
+        if phone_rows:
+            execute_values(
+                cur,
+                "INSERT INTO customer_phones "
+                "  (customer_id, normalized_phone, raw_phone, kind) VALUES %s "
+                "ON CONFLICT (customer_id, normalized_phone) DO UPDATE SET "
+                "  raw_phone  = EXCLUDED.raw_phone, "
+                "  kind       = EXCLUDED.kind, "
+                "  fetched_at = NOW()",
+                phone_rows,
+            )
+            progress(f"Persisted {len(phone_rows)} phone numbers across "
+                     f"{len(fetched)} customers.")
     conn.commit()
-    return {"fetched": len(fetched), "candidates": len(to_fetch)}
+    return {
+        "fetched": len(fetched),
+        "candidates": len(to_fetch),
+        "phone_rows": len(phone_rows) if 'phone_rows' in locals() else 0,
+    }
 
 
 def sync_call_list_openers(

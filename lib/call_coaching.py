@@ -295,8 +295,11 @@ def compute_conversion_stats(
                 COALESCE(
                   c.customer_id,
                   (
-                    SELECT cc.customer_id FROM customer_contacts cc
-                    WHERE RIGHT(REGEXP_REPLACE(COALESCE(cc.phone,''), '\D', '', 'g'), 10) =
+                    -- Reverse-lookup against customer_phones (multi-phone
+                    -- table). Catches calls coming from a customer's
+                    -- non-primary number (spouse, work line, etc).
+                    SELECT cp.customer_id FROM customer_phones cp
+                    WHERE cp.normalized_phone =
                           RIGHT(REGEXP_REPLACE(COALESCE(c.from_phone,''), '\D', '', 'g'), 10)
                       AND LENGTH(RIGHT(REGEXP_REPLACE(COALESCE(c.from_phone,''), '\D', '', 'g'), 10)) = 10
                     LIMIT 1
@@ -337,8 +340,11 @@ def compute_conversion_stats(
                 COALESCE(
                   c.customer_id,
                   (
-                    SELECT cc.customer_id FROM customer_contacts cc
-                    WHERE RIGHT(REGEXP_REPLACE(COALESCE(cc.phone,''), '\D', '', 'g'), 10) =
+                    -- Reverse-lookup against customer_phones (multi-phone
+                    -- table). Catches calls coming from a customer's
+                    -- non-primary number (spouse, work line, etc).
+                    SELECT cp.customer_id FROM customer_phones cp
+                    WHERE cp.normalized_phone =
                           RIGHT(REGEXP_REPLACE(COALESCE(c.from_phone,''), '\D', '', 'g'), 10)
                       AND LENGTH(RIGHT(REGEXP_REPLACE(COALESCE(c.from_phone,''), '\D', '', 'g'), 10)) = 10
                     LIMIT 1
