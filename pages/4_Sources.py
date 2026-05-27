@@ -414,6 +414,22 @@ else:
         help="Additional revenue from PPC customers' follow-up invoices, on top of the direct PPC invoices.",
     )
 
+    # Customer-lifecycle status from latest_invoice age (read: "did this
+    # PPC dollar buy a recurring customer or a one-and-done?"). Buckets
+    # match common HVAC retention buckets.
+    _today = pd.Timestamp.today().normalize()
+    _days_since = (_today - pd.to_datetime(by_cust["latest_invoice"])).dt.days
+
+    def _status(days):
+        if pd.isna(days):
+            return "Unknown"
+        if days <= 90:   return "Active"
+        if days <= 180:  return "At risk"
+        if days <= 365:  return "Dormant"
+        return "Lost"
+
+    by_cust["status"] = _days_since.map(_status)
+
     display = by_cust.assign(
         revenue_fmt=lambda d: d["revenue"].map(lambda v: f"${v:,.2f}"),
         first_ppc=lambda d: pd.to_datetime(d["first_ppc_date"]).dt.strftime("%Y-%m-%d"),
@@ -422,19 +438,27 @@ else:
     ).rename(
         columns={
             "customer": "Customer",
+            "status": "Status",
             "invoices": "Invoices",
             "revenue_fmt": "Revenue",
             "first_ppc": "First PPC",
             "first": "First invoice (post-PPC)",
             "latest": "Latest invoice",
-            "customer_id": "Customer ID",
         }
-    )[["Customer", "First PPC", "Invoices", "Revenue", "First invoice (post-PPC)",
-       "Latest invoice", "Customer ID"]]
-    st.dataframe(display, use_container_width=True, hide_index=True, height=380)
+    )[["Customer", "Status", "First PPC", "Invoices", "Revenue",
+       "First invoice (post-PPC)", "Latest invoice"]]
+
+    # Color the Status column using the shared style helper (Active=green,
+    # Lost=red, Dormant=muted). 'At risk' isn't in STATUS_COLORS so it
+    # renders neutral — acceptable.
+    from lib.style import style_status_columns
+    st.dataframe(
+        style_status_columns(display, ["Status"]),
+        use_container_width=True, hide_index=True, height=380,
+    )
 
     csv = by_cust[
-        ["customer_id", "customer", "first_ppc_date", "invoices", "revenue",
+        ["customer", "status", "first_ppc_date", "invoices", "revenue",
          "first_invoice", "latest_invoice"]
     ].to_csv(index=False).encode("utf-8")
     st.download_button(
