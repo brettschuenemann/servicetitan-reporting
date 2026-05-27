@@ -480,6 +480,17 @@ def load_missed_calls(conn) -> list[dict]:
                   AND i.total > 0
                   AND i.invoice_date >= (c.created_on AT TIME ZONE 'UTC')::date
               )
+              -- Also drop calls where the customer has an active future-
+              -- looking job created on/after the missed call — they're
+              -- on the schedule, a tech is coming, no need to chase.
+              AND NOT EXISTS (
+                SELECT 1 FROM jobs j
+                WHERE j.customer_id = c.customer_id
+                  AND j.job_status IN ('Scheduled', 'Dispatched',
+                                        'InProgress', 'Working', 'Hold')
+                  AND j.completed_on IS NULL
+                  AND j.created_on >= c.created_on
+              )
             ORDER BY c.received_on DESC
             """
         )
