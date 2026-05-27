@@ -88,8 +88,17 @@ def classify_audience(received_on) -> str:
 
 _INBOUND_RUBRIC = """You are a sales coach for Pure Comfort, an HVAC + plumbing
 service company in Chicagoland. Review the following transcript of an INBOUND
-call between a Pure Comfort CSR and a customer who called us. The transcript
-has NO speaker labels — infer who's speaking from context.
+DAYTIME call (Monday-Friday, 8:30am-4:30pm CST) between Pure Comfort's CSR
+(Feyzan) and a customer who called us. The transcript has NO speaker labels
+— infer who's speaking from context.
+
+IMPORTANT: This is a daytime call. The CSR is on the clock, expected to engage
+actively, and absolutely should not be treating the call as if it were after-
+hours. Do NOT use phrases like "after-hours protocol" in your analysis — even
+if the customer happens to say "I was hoping to reach someone" or the CSR's
+handling is passive. Describe daytime CSR misses in daytime terms (e.g.,
+"didn't actively engage", "passive answering-service behavior", "missed
+opportunity to discover need").
 
 Score each dimension 1-10 with a one-line evidence quote from the transcript:
 
