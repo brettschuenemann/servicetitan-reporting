@@ -66,7 +66,7 @@ st.session_state.setdefault("call_list_search", "")
 
 @st.cache_data(ttl=300, show_spinner="Loading call list…")
 def _load_sections() -> dict:
-    """Pull all four sections + recommendation/outreach state."""
+    """Pull all four sections + recommendation/outreach state + hot leads."""
     with db() as conn:
         state = load_recommendation_state(conn)
         memberships_all = load_membership_opps(conn)
@@ -76,13 +76,247 @@ def _load_sections() -> dict:
         # Pull 4× the cap so suppressed/in-cooldown ones still leave a healthy
         # bench when she clears the visible list.
         estimates_all = load_open_estimates(conn, min_age_days=30)
+        hot_leads = _load_hot_leads(conn)
     return {
         "state": state,
         "memberships_all": memberships_all,
         "sleeping_all": sleeping_all,
         "missed_all": missed_all,
         "estimates_all": estimates_all,
+        "hot_leads": hot_leads,
     }
+
+
+def _load_hot_leads(conn) -> list[dict]:
+    """Customers Fey should call FIRST, regardless of which bucket they're in.
+
+    A lead is "hot" if it matches ANY of these deterministic signals
+    (highest-priority reason wins on dedupe):
+
+      1. CALLBACK — they called us back after we tried to reach them.
+         The gold-standard signal: customer-initiated re-contact.
+      2. WARM QUOTE — open estimate ≥$2k AND inbound call in last 14d.
+         They're actively engaging on a real-money decision.
+      3. CAPTURED UNCLOSED — paid a diagnostic fee ($50-$300) in last
+         30d but no follow-up job since. We earned their trust and
+         have a foot in the door; need to close the recommended work.
+      4. DECISION DEADLINE — open estimate ≥$5k aged 7-21 days. Sweet
+         spot before quotes go cold; >21d decay sharply.
+      5. HIGH-LTV NEW SIGNAL — $5k+ lifetime customer with ANY new
+         activity in last 14 days (inbound, new estimate, new job).
+         Loyal-customer reappearance — biggest relationship to protect.
+
+    Excludes customers with a permanent suppressing outcome
+    (sold/declined/wrong#) on file.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            -- Customers we should never re-surface even on a hot signal:
+            -- they have a fresh permanent outcome that resolves the lead.
+            WITH permanent_suppress AS (
+              SELECT DISTINCT customer_id FROM csr_customer_outcomes
+              WHERE outcome IN ('sold','enrolled','declined','wrong_number',
+                                'reactivated','followed_up')
+                AND (expires_at IS NULL OR expires_at > NOW())
+                AND recorded_at >= NOW() - INTERVAL '180 day'
+                AND customer_id IS NOT NULL
+            ),
+            -- Customers with an active future-looking job. If a customer
+            -- has a scheduled / in-progress / dispatched job created in
+            -- the last 30 days, they're in motion — the lead has converted
+            -- (or is on its way) and Fey shouldn't be chasing them.
+            already_scheduled AS (
+              SELECT DISTINCT customer_id FROM jobs
+              WHERE customer_id IS NOT NULL
+                AND job_status IN ('Scheduled', 'Dispatched',
+                                    'InProgress', 'Working', 'Hold')
+                AND completed_on IS NULL
+                AND created_on >= NOW() - INTERVAL '30 day'
+            ),
+            -- Customer name cache for display
+            cust_name AS (
+              SELECT customer_id, MIN(customer_name) AS name
+              FROM invoices
+              WHERE customer_name IS NOT NULL AND customer_id IS NOT NULL
+              GROUP BY customer_id
+            ),
+            history AS (
+              SELECT customer_id,
+                     COUNT(*) AS lifetime_invoices,
+                     SUM(total) AS lifetime_revenue,
+                     MAX(invoice_date) AS last_visit
+              FROM invoices
+              WHERE customer_id IS NOT NULL AND total > 0
+              GROUP BY customer_id
+            ),
+
+            -- ── Signal 1: CALLBACK ───────────────────────────────────
+            -- Customer called us back after our outreach. We use the
+            -- same logic the existing outreach detector uses:
+            -- a customer in csr_recommendations who later made an
+            -- inbound call after the reference point.
+            signal_callback AS (
+              SELECT DISTINCT
+                cr.customer_id,
+                'CALLBACK' AS reason,
+                1 AS priority,
+                MAX(c.received_on) AS signal_at,
+                'Called us back after our outreach' AS detail
+              FROM csr_recommendations cr
+              JOIN calls c ON c.customer_id = cr.customer_id
+              WHERE c.direction = 'Inbound'
+                AND c.received_on >= cr.sent_at
+                AND cr.sent_at >= NOW() - INTERVAL '60 day'
+                AND cr.customer_id IS NOT NULL
+              GROUP BY cr.customer_id
+              HAVING MAX(c.received_on) >= NOW() - INTERVAL '7 day'
+            ),
+
+            -- ── Signal 2: WARM QUOTE ─────────────────────────────────
+            -- Open estimate >= $2k AND customer has an inbound call in
+            -- the last 14 days. Active engagement on real money.
+            signal_warm_quote AS (
+              SELECT DISTINCT
+                e.customer_id,
+                'WARM_QUOTE' AS reason,
+                2 AS priority,
+                MAX(c.received_on) AS signal_at,
+                'Open $' || ROUND(MAX(e.subtotal))::text
+                  || ' quote + recent inbound call' AS detail
+              FROM estimates e
+              JOIN calls c ON c.customer_id = e.customer_id
+              WHERE e.status_name = 'Open' AND e.active = TRUE
+                AND e.subtotal >= 2000
+                AND e.customer_id IS NOT NULL
+                AND c.direction = 'Inbound'
+                AND c.received_on >= NOW() - INTERVAL '14 day'
+              GROUP BY e.customer_id
+            ),
+
+            -- ── Signal 3: CAPTURED UNCLOSED ──────────────────────────
+            -- They paid a small diagnostic/service fee in the last 30
+            -- days, but no follow-up job has been created since. We
+            -- have a foot in the door — close the recommended work.
+            signal_captured AS (
+              SELECT DISTINCT
+                i.customer_id,
+                'CAPTURED_UNCLOSED' AS reason,
+                3 AS priority,
+                MAX(i.invoice_date)::timestamptz AS signal_at,
+                'Paid $' || ROUND(MAX(i.total))::text
+                  || ' diagnostic on ' || TO_CHAR(MAX(i.invoice_date), 'Mon DD')
+                  || ' — no follow-up booked' AS detail
+              FROM invoices i
+              WHERE i.customer_id IS NOT NULL
+                AND i.total BETWEEN 50 AND 300
+                AND i.invoice_date >= CURRENT_DATE - INTERVAL '30 day'
+                AND NOT EXISTS (
+                  SELECT 1 FROM jobs j
+                  WHERE j.customer_id = i.customer_id
+                    AND j.created_on > i.invoice_date::timestamp
+                    AND j.no_charge = FALSE
+                )
+              GROUP BY i.customer_id
+            ),
+
+            -- ── Signal 4: DECISION DEADLINE ──────────────────────────
+            -- Open estimate >= $5k aged 7-21 days. Past the "fresh"
+            -- window where customers are still researching; before
+            -- the "dead" window where they've moved on.
+            signal_deadline AS (
+              SELECT DISTINCT
+                e.customer_id,
+                'DECISION_DEADLINE' AS reason,
+                4 AS priority,
+                e.created_on AS signal_at,
+                '$' || ROUND(e.subtotal)::text || ' quote — day '
+                  || EXTRACT(DAY FROM NOW() - e.created_on)::int::text
+                  || ' of decision window' AS detail
+              FROM estimates e
+              WHERE e.status_name = 'Open' AND e.active = TRUE
+                AND e.subtotal >= 5000
+                AND e.customer_id IS NOT NULL
+                AND e.created_on BETWEEN NOW() - INTERVAL '21 day'
+                                     AND NOW() - INTERVAL '7 day'
+            ),
+
+            -- ── Signal 5: HIGH-LTV NEW SIGNAL ────────────────────────
+            -- Customer with $5k+ lifetime revenue who showed ANY new
+            -- activity in last 14 days. Inbound call, new estimate,
+            -- or new job (paid or unpaid).
+            signal_high_ltv AS (
+              SELECT DISTINCT
+                h.customer_id,
+                'HIGH_LTV_SIGNAL' AS reason,
+                5 AS priority,
+                GREATEST(
+                  COALESCE((SELECT MAX(received_on) FROM calls
+                            WHERE customer_id = h.customer_id
+                              AND direction = 'Inbound'
+                              AND received_on >= NOW() - INTERVAL '14 day'),
+                           '1970-01-01'::timestamptz),
+                  COALESCE((SELECT MAX(created_on) FROM estimates
+                            WHERE customer_id = h.customer_id
+                              AND created_on >= NOW() - INTERVAL '14 day'),
+                           '1970-01-01'::timestamptz),
+                  COALESCE((SELECT MAX(created_on) FROM jobs
+                            WHERE customer_id = h.customer_id
+                              AND created_on >= NOW() - INTERVAL '14 day'),
+                           '1970-01-01'::timestamptz)
+                ) AS signal_at,
+                'Loyal $' || ROUND((h.lifetime_revenue/1000.0)::numeric, 1)::text
+                  || 'k customer with new activity' AS detail
+              FROM history h
+              WHERE h.lifetime_revenue >= 5000
+                AND (
+                  EXISTS (SELECT 1 FROM calls
+                          WHERE customer_id = h.customer_id
+                            AND direction = 'Inbound'
+                            AND received_on >= NOW() - INTERVAL '14 day')
+                  OR EXISTS (SELECT 1 FROM estimates
+                             WHERE customer_id = h.customer_id
+                               AND created_on >= NOW() - INTERVAL '14 day')
+                  OR EXISTS (SELECT 1 FROM jobs
+                             WHERE customer_id = h.customer_id
+                               AND created_on >= NOW() - INTERVAL '14 day')
+                )
+            ),
+
+            -- Union all signals; dedupe by customer_id, picking the
+            -- highest-priority reason (lowest priority number wins).
+            all_signals AS (
+              SELECT * FROM signal_callback
+              UNION ALL SELECT * FROM signal_warm_quote
+              UNION ALL SELECT * FROM signal_captured
+              UNION ALL SELECT * FROM signal_deadline
+              UNION ALL SELECT * FROM signal_high_ltv
+            ),
+            ranked AS (
+              SELECT DISTINCT ON (customer_id)
+                customer_id, reason, priority, signal_at, detail
+              FROM all_signals
+              ORDER BY customer_id, priority
+            )
+
+            SELECT
+              r.customer_id, r.reason, r.priority, r.detail, r.signal_at,
+              COALESCE(cn.name, 'Customer ' || r.customer_id::text) AS customer_name,
+              COALESCE(h.lifetime_invoices, 0) AS lifetime_invoices,
+              COALESCE(h.lifetime_revenue, 0)  AS lifetime_revenue,
+              h.last_visit
+            FROM ranked r
+            LEFT JOIN cust_name cn ON cn.customer_id = r.customer_id
+            LEFT JOIN history h    ON h.customer_id = r.customer_id
+            LEFT JOIN permanent_suppress ps ON ps.customer_id = r.customer_id
+            LEFT JOIN already_scheduled sched ON sched.customer_id = r.customer_id
+            WHERE ps.customer_id IS NULL
+              AND sched.customer_id IS NULL
+            ORDER BY r.priority, r.signal_at DESC
+            LIMIT 12
+            """
+        )
+        return [dict(r) for r in cur.fetchall()]
 
 
 # ---------- contact + opener caches now live in Postgres ----------
@@ -444,6 +678,7 @@ memberships_all = data["memberships_all"]
 sleeping_all = data["sleeping_all"]
 missed_all = data["missed_all"]
 estimates_all = data["estimates_all"]
+hot_leads_rows = data["hot_leads"]
 
 # Apply suppression
 memberships = [r for r in memberships_all
@@ -787,6 +1022,184 @@ def render_row(r: dict, kind: str, call_id: int | None = None):
                     on_click=_on_save_note,
                     args=(cid, note_key),
                 )
+
+
+# ---------- 🔥 hot leads: customer-initiated contact in last 48h ----------
+# Top-of-page strip — these are customers who reached out to US, not the
+# other way around. Highest-intent signal in the entire system. Beats
+# every section below by definition.
+
+# Hot-lead scripts — one per reason. {name} interpolation only;
+# the "Why hot" detail line already carries the deal specifics
+# (amount, age, etc.) so scripts stay short and reusable.
+HOT_LEAD_SCRIPTS = {
+    "CALLBACK": [
+        ("Opener", "\"Hi {name}, this is Fey at Pure Comfort — thanks for calling back. What can I help you with today?\""),
+        ("Listen first", "Let them lead. Whatever they're calling about IS the opportunity. Don't pivot to a script."),
+        ("Close", "\"Let me get someone out to take a look. What's better for you, morning or afternoon this week?\""),
+    ],
+    "WARM_QUOTE": [
+        ("Opener", "\"Hi {name}, this is Fey at Pure Comfort. I saw you called in about your quote — wanted to follow up. Have you had a chance to look it over?\""),
+        ("Discover", "\"Anything specific you'd like to talk through, or just need a little more time?\""),
+        ("Save / urgency", "\"If you can lock it in this week, I can usually pull your install forward — let's get you on the calendar before things fill up.\""),
+        ("Close", "\"Want to do that, or would it help if I sent a quick summary you can look at on your own time?\""),
+    ],
+    "CAPTURED_UNCLOSED": [
+        ("Opener", "\"Hi {name}, it's Fey from Pure Comfort. I'm following up after our tech was out — did you get a chance to think over the recommendations?\""),
+        ("Reframe", "\"The diagnostic fee gets applied toward the work if you go ahead — so it's already paying for itself the moment we get this done.\""),
+        ("Close", "\"Want me to get someone back out this week to take care of it?\""),
+        ("If \"still thinking\"", "\"Totally fair. Mind if I send you a short email recap so it's easy to refer back to?\""),
+    ],
+    "DECISION_DEADLINE": [
+        ("Opener", "\"Hi {name}, this is Fey at Pure Comfort — wanted to check in on the quote our team sent you. How are you feeling about it?\""),
+        ("Soft urgency", "\"We're filling up our install calendar — I'd hate for the timing to slip. Anything specific holding you back?\""),
+        ("Close", "\"If we can confirm this week, I can put you on next week's schedule. Want me to lock it in?\""),
+    ],
+    "HIGH_LTV_SIGNAL": [
+        ("Opener", "\"Hi {name}, this is Fey at Pure Comfort — always good to hear from you. What's going on?\""),
+        ("Listen first", "Recognize the relationship before pitching anything. They've been loyal — treat this like a check-in, not a sale."),
+        ("Soft offer", "\"While I have you — anything around the house that's been on your list? We can usually get out within a few days.\""),
+    ],
+}
+
+
+def _hot_lead_first_name(customer_name: str) -> str:
+    """Extract first name from 'Last, First' or 'First Last' formats."""
+    if not customer_name:
+        return "there"
+    name = customer_name.strip()
+    if "," in name:
+        # "Straus, Nancy & Barney" → "Nancy"
+        first_part = name.split(",", 1)[1].strip()
+        return first_part.split()[0] if first_part else "there"
+    return name.split()[0] if name.split() else "there"
+
+
+_active_filter = st.session_state.get("call_list_filter", "All")
+if hot_leads_rows and _active_filter in ("All", "Hot leads only"):
+    # Color + label per signal kind. Same colors as Streamlit's alert
+    # palette so they read intuitively (callback = green/inbound,
+    # warm quote = blue/in-flight, captured = amber/needs action, etc).
+    REASON_META = {
+        "CALLBACK": {
+            "emoji": "🔁", "label": "Called us back",
+            "bg": "#D1FAE5", "fg": "#065F46",
+        },
+        "WARM_QUOTE": {
+            "emoji": "💬", "label": "Warm quote",
+            "bg": "#DBEAFE", "fg": "#1E3A8A",
+        },
+        "CAPTURED_UNCLOSED": {
+            "emoji": "🔑", "label": "Captured, unclosed",
+            "bg": "#FEF3C7", "fg": "#92400E",
+        },
+        "DECISION_DEADLINE": {
+            "emoji": "⏰", "label": "Decision deadline",
+            "bg": "#FED7AA", "fg": "#7C2D12",
+        },
+        "HIGH_LTV_SIGNAL": {
+            "emoji": "💎", "label": "High-LTV signal",
+            "bg": "#EDE9FE", "fg": "#5B21B6",
+        },
+    }
+
+    # Header strip with the attention-grabbing styling
+    st.markdown(
+        f"<div style='background:linear-gradient(90deg,#FEE2E2 0%,#FED7AA 100%);"
+        f"padding:10px 14px;border-radius:8px;border-left:4px solid #DC2626;"
+        f"margin-bottom:8px'>"
+        f"<div style='font-size:13px;font-weight:800;color:#7F1D1D;"
+        f"text-transform:uppercase;letter-spacing:0.06em'>"
+        f"🔥 Drop everything — {len(hot_leads_rows)} hot lead{'s' if len(hot_leads_rows) != 1 else ''}</div>"
+        f"<div style='font-size:12px;color:#7C2D12;margin-top:2px'>"
+        f"Call these before any of your buckets below. Each badge explains why."
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    _hot_cids_for_contacts = [r.get("customer_id") for r in hot_leads_rows
+                              if r.get("customer_id")]
+    _hot_contact_map = _bulk_lookup_contacts(_hot_cids_for_contacts) if _hot_cids_for_contacts else {}
+
+    for r in hot_leads_rows:
+        cid = r.get("customer_id")
+        reason = r.get("reason") or "CALLBACK"
+        meta = REASON_META.get(reason, REASON_META["CALLBACK"])
+
+        # Resolve contact
+        phone, email = "", ""
+        if cid and int(cid) in _hot_contact_map:
+            phone, email = _hot_contact_map[int(cid)]
+        phone_disp = fmt_phone(phone) if phone else "no phone"
+        phone_html = (
+            f"<a href='{escape(tel_href(phone))}' style='color:#0066EE;"
+            f"text-decoration:none;font-weight:700'>📞 {escape(phone_disp)}</a>"
+            if phone else "<span style='color:#999'>📞 no phone on file</span>"
+        )
+
+        # History
+        ltv = float(r.get("lifetime_revenue") or 0)
+        invoices = int(r.get("lifetime_invoices") or 0)
+        history_html = (
+            f"Existing customer · lifetime {fmt_money(ltv)} across {invoices} visits"
+            if ltv else "New caller — no prior history"
+        )
+
+        # Signal badge
+        badge_html = (
+            f"<span style='background:{meta['bg']};color:{meta['fg']};"
+            f"padding:3px 10px;border-radius:10px;font-size:11px;"
+            f"font-weight:700;text-transform:uppercase;letter-spacing:0.04em;"
+            f"margin-left:8px'>"
+            f"{meta['emoji']} {escape(meta['label'])}</span>"
+        )
+
+        with st.container(border=True):
+            st.markdown(
+                f"<div style='font-size:16px;font-weight:700;color:#111'>"
+                f"{escape(r.get('customer_name') or 'Unknown')}{badge_html}</div>"
+                f"<div style='font-size:13px;color:#444;margin-top:4px;"
+                f"padding:6px 10px;background:{meta['bg']};border-radius:6px;"
+                f"border-left:3px solid {meta['fg']}'>"
+                f"<b>Why hot:</b> {escape(r.get('detail') or '')}</div>"
+                f"<div style='font-size:14px;margin:6px 0 4px'>{phone_html}</div>"
+                f"<div style='font-size:12px;color:#777'>{history_html}</div>",
+                unsafe_allow_html=True,
+            )
+
+            # Personalized call script for this signal type. Expanded by
+            # default — Fey should be able to scan it while the phone
+            # rings without an extra click.
+            script_items = HOT_LEAD_SCRIPTS.get(reason, [])
+            if script_items:
+                first_name = _hot_lead_first_name(r.get("customer_name"))
+                with st.expander("📋 Call script", expanded=True):
+                    for label, line in script_items:
+                        personalized = line.format(name=first_name)
+                        st.markdown(
+                            f"**{escape(label).upper()}** — {escape(personalized)}"
+                        )
+
+            # Outcome buttons. Use the 'missed' outcome set since these
+            # span multiple bucket types (callback → missed, warm quote →
+            # estimate, etc.) but missed's set covers the actions Fey
+            # needs after a hot-lead call.
+            cfg = OUTCOME_CONFIG["missed"]
+            cols = st.columns(len(cfg))
+            for i, (outcome_key, info) in enumerate(cfg.items()):
+                cols[i].button(
+                    info["label"],
+                    key=f"hot_{reason}_{cid}_{outcome_key}",
+                    on_click=_on_record_outcome,
+                    args=("missed", cid, None, outcome_key),
+                    use_container_width=True,
+                    help=(
+                        "Permanent" if info["expires_days"] is None
+                        else f"Suppresses for {info['expires_days']} days"
+                    ),
+                )
+
+    st.markdown("<div style='margin-bottom:6px'></div>", unsafe_allow_html=True)
 
 
 # ---------- sections ----------
