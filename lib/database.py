@@ -405,12 +405,41 @@ def _database_url() -> str:
     return url
 
 
+# Schema apply is expensive and acquires AccessExclusiveLock on every
+# ALTER TABLE … ADD COLUMN IF NOT EXISTS statement (even when the column
+# already exists). Doing this on every connection caused deadlocks when
+# two Streamlit threads opened connections concurrently — both tried to
+# grab AccessExclusiveLock on the same tables.
+#
+# Fix: apply once per process via the module-level flag, and serialize
+# across concurrent processes using a Postgres advisory lock. If schema
+# apply fails for any reason, we don't crash the connection — the caller
+# can still use it (worst case: missing column triggers a clear error
+# later when they actually query).
+_SCHEMA_APPLIED = False
+_SCHEMA_LOCK_KEY = 8467326791  # arbitrary 64-bit int; pure namespace
+
+
 def get_connection() -> psycopg2.extensions.connection:
-    """Open a new Postgres connection with the schema applied. Caller owns the lifetime."""
+    """Open a new Postgres connection. Schema is applied once per process."""
+    global _SCHEMA_APPLIED
     conn = psycopg2.connect(_database_url(), cursor_factory=psycopg2.extras.RealDictCursor)
-    with conn.cursor() as cur:
-        cur.execute(SCHEMA)
-    conn.commit()
+    if not _SCHEMA_APPLIED:
+        try:
+            with conn.cursor() as cur:
+                # Advisory lock serializes schema apply across processes.
+                # All workers wait here; only one runs the SCHEMA at a time.
+                cur.execute("SELECT pg_advisory_lock(%s)", (_SCHEMA_LOCK_KEY,))
+                cur.execute(SCHEMA)
+                cur.execute("SELECT pg_advisory_unlock(%s)", (_SCHEMA_LOCK_KEY,))
+            conn.commit()
+            _SCHEMA_APPLIED = True
+        except Exception as exc:
+            # If apply fails (e.g. another process raced us), don't crash —
+            # the schema is most likely already correct, and any actual
+            # missing column will surface as a clear runtime error.
+            conn.rollback()
+            print(f"Schema apply skipped: {exc}")
     return conn
 
 
