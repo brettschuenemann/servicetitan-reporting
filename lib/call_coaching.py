@@ -325,6 +325,9 @@ def compute_conversion_stats(
         coverage = dict(cur.fetchone())
 
         # Conversion: did a paid invoice land in the attribution window?
+        # Also classify each matched customer as net_new (first invoice ever
+        # was at-or-after the call) vs existing (first invoice was before)
+        # — surfaces brand-new customer acquisitions distinctly.
         cur.execute(
             r"""
             WITH resolved AS (
@@ -347,6 +350,12 @@ def compute_conversion_stats(
                 AND c.received_on >= NOW() - (%s || ' day')::interval
                 AND s.error IS NULL
             ),
+            first_invoice AS (
+              SELECT customer_id, MIN(invoice_date) AS first_inv_date
+              FROM invoices
+              WHERE customer_id IS NOT NULL AND total > 0
+              GROUP BY customer_id
+            ),
             attribution AS (
               SELECT
                 r.id,
@@ -365,13 +374,30 @@ def compute_conversion_stats(
                     AND i.invoice_date <  (r.received_on AT TIME ZONE 'UTC')::date
                                           + (%s || ' day')::interval
                     AND i.total > 0
-                ), 0) AS revenue
+                ), 0) AS revenue,
+                CASE
+                  WHEN fi.first_inv_date IS NULL THEN 'never_paid'
+                  WHEN fi.first_inv_date >= (r.received_on AT TIME ZONE 'UTC')::date
+                       THEN 'net_new'
+                  ELSE 'existing'
+                END AS customer_kind
               FROM resolved r
+              LEFT JOIN first_invoice fi ON fi.customer_id = r.effective_customer_id
               WHERE r.effective_customer_id IS NOT NULL
             )
             SELECT
               COUNT(*) FILTER (WHERE converted) AS converted_count,
-              COALESCE(SUM(revenue), 0) AS total_revenue
+              COALESCE(SUM(revenue), 0) AS total_revenue,
+              COUNT(*) FILTER (WHERE converted AND customer_kind = 'net_new')
+                AS net_new_converted,
+              COUNT(*) FILTER (WHERE customer_kind = 'net_new')
+                AS net_new_total,
+              COALESCE(SUM(revenue) FILTER (WHERE customer_kind = 'net_new'), 0)
+                AS net_new_revenue,
+              COUNT(*) FILTER (WHERE converted AND customer_kind = 'existing')
+                AS existing_converted,
+              COUNT(*) FILTER (WHERE customer_kind = 'existing')
+                AS existing_total
             FROM attribution
             """,
             (audience, lookback_days, attribution_days, attribution_days),
@@ -382,6 +408,11 @@ def compute_conversion_stats(
     total = coverage["total_inbound"] or 0
     converted = result["converted_count"] or 0
     revenue = float(result["total_revenue"] or 0)
+
+    net_new_total = result["net_new_total"] or 0
+    net_new_converted = result["net_new_converted"] or 0
+    existing_total = result["existing_total"] or 0
+    existing_converted = result["existing_converted"] or 0
 
     return {
         "audience": audience,
@@ -397,6 +428,14 @@ def compute_conversion_stats(
         "attributed_revenue": revenue,
         "revenue_per_matched_call": (revenue / matched) if matched else 0,
         "revenue_per_inbound_call": (revenue / total) if total else 0,
+        # Net-new vs existing breakdown
+        "net_new_total": net_new_total,
+        "net_new_converted": net_new_converted,
+        "net_new_revenue": float(result["net_new_revenue"] or 0),
+        "net_new_conversion_rate": (net_new_converted / net_new_total) if net_new_total else 0,
+        "existing_total": existing_total,
+        "existing_converted": existing_converted,
+        "existing_conversion_rate": (existing_converted / existing_total) if existing_total else 0,
     }
 
 

@@ -294,6 +294,35 @@ def _render_audience(audience: str, label: str, positive_label: str) -> None:
             f"(this is {'+' if delta_rev >= 0 else ''}${delta_rev:,.0f})"
         )
 
+    # Net-new vs existing customer acquisition breakdown
+    st.markdown("**Net-new customer acquisition** (callers whose first-ever paid "
+                "invoice was at or after the call)")
+    nn1, nn2, nn3, nn4 = st.columns(4)
+    nn1.metric(
+        "🆕 Net-new customers",
+        f"{own_conv['net_new_converted']}",
+        help=f"{own_conv['net_new_converted']} of {own_conv['net_new_total']} "
+             f"first-time callers became paying customers within "
+             f"{own_conv['attribution_days']} days",
+    )
+    nn2.metric(
+        "Net-new revenue",
+        f"${own_conv['net_new_revenue']:,.0f}",
+        help="Attributed revenue from brand-new customer acquisitions",
+    )
+    nn3.metric(
+        "Net-new conv. rate",
+        f"{100 * own_conv['net_new_conversion_rate']:.0f}%",
+        help="Of first-time callers we could attribute, how many became paying",
+    )
+    nn4.metric(
+        "Existing-customer conv.",
+        f"{100 * own_conv['existing_conversion_rate']:.0f}%",
+        help=f"{own_conv['existing_converted']} of {own_conv['existing_total']} "
+             f"existing customers had a paid invoice within "
+             f"{own_conv['attribution_days']} days",
+    )
+
     st.divider()
 
     # ---------- filters ----------
