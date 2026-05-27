@@ -527,6 +527,14 @@ def find_unscored_calls(
                 LOWER(SPLIT_PART(TRIM(COALESCE(c.agent_name, '')), ' ', 1))
                     = ANY(%s)
               )
+              -- Skip NotLead — ST's own "not a sales lead" classification.
+              -- These are solicitors (Q101 radio, propane magazines),
+              -- wrong-number callers (doctor's office mix-ups), internal
+              -- staff calls (Danielle/Exosian about accounting), insurance
+              -- broker cold calls, etc. Scoring them against the CSR sales
+              -- rubric is pure noise (avg 1.9/10) and pollutes coaching
+              -- insights with bogus "fundamentally broken" verdicts.
+              AND COALESCE(c.call_type, '') <> 'NotLead'
             ORDER BY c.received_on DESC
             LIMIT %s
             """,
