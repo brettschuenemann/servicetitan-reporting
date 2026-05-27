@@ -196,10 +196,11 @@ def load_tech_filters(st_client: ServiceTitanClient) -> tuple[list[str], list[st
 def find_unscored_calls(
     conn,
     limit: int = DEFAULT_BATCH_LIMIT,
+    lookback_days: int = LOOKBACK_DAYS,
     exclude_phones: Optional[list[str]] = None,
     exclude_names: Optional[list[str]] = None,
 ) -> list[dict]:
-    """Calls with a recording but no score yet, within LOOKBACK_DAYS.
+    """Calls with a recording but no score yet, within `lookback_days`.
 
     Filters out tech-related calls via SQL (no wasted fetches):
       - Inbound from_phone matching a tech                → skip
@@ -226,19 +227,16 @@ def find_unscored_calls(
               AND c.duration_seconds >= %s
               AND c.received_on >= NOW() - (%s || ' day')::interval
               AND s.call_id IS NULL
-              -- exclude inbound calls from a tech's phone
               AND NOT (
                 c.direction = 'Inbound'
                 AND RIGHT(REGEXP_REPLACE(COALESCE(c.from_phone, ''), '\D', '', 'g'), 10)
                     = ANY(%s)
               )
-              -- exclude outbound calls to a tech's phone
               AND NOT (
                 c.direction = 'Outbound'
                 AND RIGHT(REGEXP_REPLACE(COALESCE(c.to_phone, ''), '\D', '', 'g'), 10)
                     = ANY(%s)
               )
-              -- exclude calls where the agent is a tech (e.g. Bud's outbound)
               AND NOT (
                 LOWER(SPLIT_PART(TRIM(COALESCE(c.agent_name, '')), ' ', 1))
                     = ANY(%s)
@@ -246,7 +244,7 @@ def find_unscored_calls(
             ORDER BY c.received_on DESC
             LIMIT %s
             """,
-            (MIN_DURATION_SECONDS, LOOKBACK_DAYS, phones, phones, names, limit),
+            (MIN_DURATION_SECONDS, lookback_days, phones, phones, names, limit),
         )
         return [dict(r) for r in cur.fetchall()]
 
@@ -382,6 +380,7 @@ def score_calls_batch(
     conn,
     st_client: ServiceTitanClient,
     limit: int = DEFAULT_BATCH_LIMIT,
+    lookback_days: int = LOOKBACK_DAYS,
     progress: ProgressCallback = _noop,
 ) -> dict:
     """Find unscored calls, download + transcribe + score each one.
@@ -399,10 +398,10 @@ def score_calls_batch(
     )
 
     pending = find_unscored_calls(
-        conn, limit=limit,
+        conn, limit=limit, lookback_days=lookback_days,
         exclude_phones=tech_phones, exclude_names=tech_names,
     )
-    progress(f"Found {len(pending)} unscored calls (≥{MIN_DURATION_SECONDS}s, ≤{LOOKBACK_DAYS}d old)")
+    progress(f"Found {len(pending)} unscored calls (≥{MIN_DURATION_SECONDS}s, ≤{lookback_days}d old)")
 
     scored = 0
     errors = 0

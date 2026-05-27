@@ -38,7 +38,7 @@ def _load_env_file() -> None:
 
 _load_env_file()
 
-from lib.call_coaching import score_calls_batch, DEFAULT_BATCH_LIMIT
+from lib.call_coaching import score_calls_batch, DEFAULT_BATCH_LIMIT, LOOKBACK_DAYS
 from lib.database import db
 from lib.servicetitan import ServiceTitanClient
 
@@ -55,7 +55,10 @@ def main() -> int:
         print(f"Missing required env: {', '.join(missing)}")
         return 1
 
+    # Both knobs are env-overridable so the same script can run as the
+    # 50-call nightly cron OR a one-off backfill (e.g. 500 calls / 60 days).
     limit = int(os.environ.get("SCORE_CALLS_LIMIT", DEFAULT_BATCH_LIMIT))
+    lookback = int(os.environ.get("SCORE_CALLS_LOOKBACK_DAYS", LOOKBACK_DAYS))
 
     client = ServiceTitanClient(
         app_key=os.environ["ST_APP_KEY"],
@@ -66,7 +69,7 @@ def main() -> int:
 
     with db() as conn:
         result = score_calls_batch(
-            conn, client, limit=limit,
+            conn, client, limit=limit, lookback_days=lookback,
             progress=lambda m: print(m, flush=True),
         )
 
