@@ -52,13 +52,12 @@ DEFAULT_BATCH_LIMIT = 50
 LOOKBACK_DAYS = 14
 
 
-# ---------- rubrics ----------
+# ---------- rubrics (simple prose now that tool_use enforces structure) ----------
 
 _INBOUND_RUBRIC = """You are a sales coach for Pure Comfort, an HVAC + plumbing
 service company in Chicagoland. Review the following transcript of an INBOUND
 call between a Pure Comfort CSR and a customer who called us. The transcript
-has NO speaker labels — infer who's speaking from context (questions, content,
-tone).
+has NO speaker labels — infer who's speaking from context.
 
 Score each dimension 1-10 with a one-line evidence quote from the transcript:
 
@@ -69,40 +68,17 @@ Score each dimension 1-10 with a one-line evidence quote from the transcript:
 5. Close — did the CSR ask for the appointment explicitly?
 6. Save attempt — when the caller hesitated, did the CSR try to save the booking?
 
-Then provide:
-- OVERALL SCORE (1-10 integer): your holistic read of the call quality
-- VERDICT: "bookable" (call quality was strong / customer likely booked or will)
-           | "coachable" (decent but specific gaps a 1:1 could fix)
-           | "fundamentally broken" (lost a winnable deal through clear mistakes)
-- KEY MISS: the single most important thing that, done differently, would have changed the outcome
-- NEXT TIME: a specific, repeatable behavior the CSR should try on similar calls
-- WINS: 1-3 things the CSR did well (so coaching reinforces, not just critiques)
-- COACHING SUMMARY: 2-3 sentence note Brett can share verbatim with the CSR
+Then judge OVERALL SCORE, VERDICT (bookable / coachable / fundamentally broken),
+the single KEY MISS, what to try NEXT TIME, 1-3 WINS, and a 2-3 sentence
+COACHING SUMMARY Brett can share with the CSR.
 
-Return ONLY valid JSON with this exact shape:
-{
-  "overall_score": <int 1-10>,
-  "verdict": "bookable" | "coachable" | "fundamentally broken",
-  "dimensions": {
-    "discovery":       {"score": <int>, "evidence": "..."},
-    "empathy":         {"score": <int>, "evidence": "..."},
-    "urgency":         {"score": <int>, "evidence": "..."},
-    "pricing_framing": {"score": <int>, "evidence": "..."},
-    "close":           {"score": <int>, "evidence": "..."},
-    "save_attempt":    {"score": <int>, "evidence": "..."}
-  },
-  "key_miss": "...",
-  "next_time": "...",
-  "wins": ["...", "..."],
-  "coaching_summary": "..."
-}
+Submit your analysis via the submit_coaching tool.
 """
 
 _OUTBOUND_RUBRIC = """You are a sales coach for Pure Comfort, an HVAC + plumbing
 service company in Chicagoland. Review the following transcript of an OUTBOUND
-call where a Pure Comfort CSR called a customer (warm-lead follow-up, missed-call
-return, estimate follow-up, etc.). The transcript has NO speaker labels — infer
-from context.
+call where a Pure Comfort CSR called a customer. The transcript has NO speaker
+labels — infer from context.
 
 Score each dimension 1-10 with a one-line evidence quote:
 
@@ -113,34 +89,74 @@ Score each dimension 1-10 with a one-line evidence quote:
 5. Close / next step — did the CSR ask for the appointment, decision, or specific follow-up?
 6. Tone — professional, warm, paced well, not pushy?
 
-Then provide:
-- OVERALL SCORE (1-10 integer)
-- VERDICT: "strong" (converted or set up a strong next step)
-           | "coachable" (decent but specific gaps)
-           | "weak" (the customer disengaged because of how the call went)
-- KEY MISS: single most important thing that would have changed the outcome
-- NEXT TIME: specific, repeatable behavior for similar calls
-- WINS: 1-3 things the CSR did well
-- COACHING SUMMARY: 2-3 sentence note Brett can share with the CSR
+Then judge OVERALL SCORE, VERDICT (strong / coachable / weak), the single
+KEY MISS, what to try NEXT TIME, 1-3 WINS, and a 2-3 sentence COACHING
+SUMMARY Brett can share with the CSR.
 
-Return ONLY valid JSON with this exact shape:
-{
-  "overall_score": <int 1-10>,
-  "verdict": "strong" | "coachable" | "weak",
-  "dimensions": {
-    "opener":             {"score": <int>, "evidence": "..."},
-    "discovery":          {"score": <int>, "evidence": "..."},
-    "value_framing":      {"score": <int>, "evidence": "..."},
-    "objection_handling": {"score": <int>, "evidence": "..."},
-    "close":              {"score": <int>, "evidence": "..."},
-    "tone":               {"score": <int>, "evidence": "..."}
-  },
-  "key_miss": "...",
-  "next_time": "...",
-  "wins": ["...", "..."],
-  "coaching_summary": "..."
-}
+Submit your analysis via the submit_coaching tool.
 """
+
+
+# ---------- tool_use schemas (force valid JSON via Anthropic structured output) ----------
+
+_DIM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "score": {"type": "integer", "minimum": 1, "maximum": 10},
+        "evidence": {"type": "string"},
+    },
+    "required": ["score", "evidence"],
+}
+
+
+def _coaching_tool(dim_keys: list[str], verdict_enum: list[str]) -> dict:
+    """Build the submit_coaching tool definition for either direction."""
+    return {
+        "name": "submit_coaching",
+        "description": (
+            "Submit your coaching analysis of the call. All fields are "
+            "required. Scores are 1-10 integers. Evidence should be a short "
+            "quote or paraphrase from the transcript."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "overall_score": {"type": "integer", "minimum": 1, "maximum": 10},
+                "verdict": {"type": "string", "enum": verdict_enum},
+                "dimensions": {
+                    "type": "object",
+                    "properties": {k: _DIM_SCHEMA for k in dim_keys},
+                    "required": dim_keys,
+                },
+                "key_miss": {"type": "string"},
+                "next_time": {"type": "string"},
+                "wins": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 1,
+                    "maxItems": 5,
+                },
+                "coaching_summary": {"type": "string"},
+            },
+            "required": [
+                "overall_score", "verdict", "dimensions",
+                "key_miss", "next_time", "wins", "coaching_summary",
+            ],
+        },
+    }
+
+
+_INBOUND_TOOL = _coaching_tool(
+    dim_keys=["discovery", "empathy", "urgency", "pricing_framing",
+              "close", "save_attempt"],
+    verdict_enum=["bookable", "coachable", "fundamentally broken"],
+)
+
+_OUTBOUND_TOOL = _coaching_tool(
+    dim_keys=["opener", "discovery", "value_framing", "objection_handling",
+              "close", "tone"],
+    verdict_enum=["strong", "coachable", "weak"],
+)
 
 
 # ---------- tech filtering ----------
@@ -262,13 +278,29 @@ def download_recording(st_client: ServiceTitanClient, call_id: int) -> bytes:
 
 
 def transcribe(mp3_bytes: bytes, api_key: Optional[str] = None) -> str:
-    """OpenAI Whisper transcription. ~$0.006/min, mono phone audio is its sweet spot."""
+    """OpenAI Whisper transcription. ~$0.006/min, mono phone audio is its sweet spot.
+
+    Passes a Pure-Comfort-specific prompt + language hint to nudge Whisper
+    on marginal recordings (it sometimes returns empty on silent/noisy
+    audio without the hint).
+    """
     key = api_key or os.environ["OPENAI_API_KEY"]
     r = requests.post(
         WHISPER_URL,
         headers={"Authorization": f"Bearer {key}"},
         files={"file": ("call.mp3", mp3_bytes, "audio/mpeg")},
-        data={"model": WHISPER_MODEL, "response_format": "text"},
+        data={
+            "model": WHISPER_MODEL,
+            "response_format": "text",
+            "language": "en",
+            "prompt": (
+                "This is a phone call between a Pure Comfort HVAC and "
+                "plumbing customer service representative (Feyzan) and a "
+                "customer in the Chicago area. Topics include furnaces, "
+                "air conditioning, water heaters, drain cleaning, and "
+                "service appointments."
+            ),
+        },
         timeout=180,
     )
     r.raise_for_status()
@@ -282,8 +314,16 @@ def score_transcript(
     customer_name: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> tuple[dict, int, int]:
-    """Score one transcript via Claude. Returns (report_dict, tokens_in, tokens_out)."""
-    rubric = _INBOUND_RUBRIC if (direction or "").lower() == "inbound" else _OUTBOUND_RUBRIC
+    """Score one transcript via Claude tool_use. Returns (report_dict, tokens_in, tokens_out).
+
+    Uses Anthropic's structured-output pattern: defines a `submit_coaching`
+    tool with a strict JSON schema and forces Claude to call it. The
+    response comes back as a parsed dict — no manual JSON parsing means
+    no JSONDecodeError on malformed output.
+    """
+    is_inbound = (direction or "").lower() == "inbound"
+    rubric = _INBOUND_RUBRIC if is_inbound else _OUTBOUND_RUBRIC
+    tool = _INBOUND_TOOL if is_inbound else _OUTBOUND_TOOL
     client = Anthropic(api_key=api_key or os.environ["ANTHROPIC_API_KEY"])
 
     user_msg = (
@@ -294,20 +334,21 @@ def score_transcript(
 
     resp = client.messages.create(
         model=SCORING_MODEL,
-        max_tokens=1500,
+        max_tokens=2000,
         system=rubric,
+        tools=[tool],
+        tool_choice={"type": "tool", "name": "submit_coaching"},
         messages=[{"role": "user", "content": user_msg}],
     )
 
-    raw = resp.content[0].text.strip()
-    # Strip ```json … ``` fencing if Claude added it
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-        raw = raw.strip()
-    report = json.loads(raw)
-    return report, resp.usage.input_tokens, resp.usage.output_tokens
+    # Tool_use mode returns a tool_use block whose .input is the
+    # already-parsed-and-schema-validated dict.
+    for block in resp.content:
+        if getattr(block, "type", None) == "tool_use":
+            return block.input, resp.usage.input_tokens, resp.usage.output_tokens
+
+    # Should never happen with tool_choice forced — but defensive
+    raise RuntimeError("Claude returned no tool_use block")
 
 
 def _persist_success(conn, call_id: int, transcript: str, report: dict) -> None:
