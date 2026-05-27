@@ -21,6 +21,7 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from lib.auth import require_password
+from lib.coaching_insights import build_insights, load_latest_insights
 from lib.database import db
 from lib.style import apply_mobile_styles, empty_state
 
@@ -119,7 +120,7 @@ st.caption(
     "specific call by deleting its row from `call_scores`."
 )
 
-df = load_scores(lookback_days=14)
+df = load_scores(lookback_days=60)
 
 if df.empty:
     empty_state(
@@ -128,6 +129,51 @@ if df.empty:
         icon="🌙",
     )
     st.stop()
+
+
+# ---------- Key insights (Opus 4.7 synthesis) ----------
+
+with db() as _conn:
+    latest_insights = load_latest_insights(_conn)
+
+ins_header_l, ins_header_r = st.columns([5, 1])
+with ins_header_l:
+    st.markdown("### 🧠 Key insights")
+    if latest_insights:
+        st.caption(
+            f"Opus 4.7 synthesis of {latest_insights['n_calls']} calls over "
+            f"{latest_insights['period_days']} days. Generated "
+            f"{latest_insights['generated_at']:%a %b %d at %-I:%M %p UTC}."
+        )
+    else:
+        st.caption(
+            "No insights generated yet. Click ↻ Regenerate to synthesize "
+            "patterns across your scored calls."
+        )
+with ins_header_r:
+    if st.button("↻ Regenerate", use_container_width=True,
+                 help="Build a fresh Opus 4.7 synthesis over the last 30 days "
+                      "of scored calls (~10-15s, ~$0.05)."):
+        try:
+            with st.spinner("Synthesizing with Opus 4.7…"):
+                with db() as _conn:
+                    latest_insights = build_insights(_conn, lookback_days=30)
+            st.success(
+                f"Generated · {latest_insights['n_calls']} calls analyzed · "
+                f"{latest_insights['tokens_in']} tok in / "
+                f"{latest_insights['tokens_out']} tok out"
+            )
+        except Exception as exc:
+            st.error(f"Couldn't generate insights: {exc}")
+
+if latest_insights:
+    # Escape dollar signs so Streamlit's markdown doesn't try to render
+    # them as LaTeX math (e.g. "$10,000 deal" looks weird otherwise).
+    _md = (latest_insights["insights_md"] or "").replace("$", r"\$")
+    with st.container(border=True):
+        st.markdown(_md)
+
+st.divider()
 
 # Errors flagged separately
 errored = df[df["error"].notna()]

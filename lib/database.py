@@ -317,6 +317,23 @@ CREATE TABLE IF NOT EXISTS ai_summary_todos (
 );
 CREATE INDEX IF NOT EXISTS ix_ai_todos_summary ON ai_summary_todos(summary_id);
 
+-- Cross-call coaching insights — Opus 4.7 synthesis of patterns across
+-- all scored calls in a lookback window. Cached so the Coaching page
+-- doesn't pay $0.05 per render; manually regenerated via a button.
+-- Newest row is the "current" one (ORDER BY generated_at DESC LIMIT 1).
+CREATE TABLE IF NOT EXISTS coaching_insights (
+    id           BIGSERIAL PRIMARY KEY,
+    generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    period_days  INTEGER NOT NULL,
+    n_calls      INTEGER NOT NULL,
+    insights_md  TEXT NOT NULL,
+    raw_brief    TEXT,
+    model        TEXT,
+    tokens_in    INTEGER,
+    tokens_out   INTEGER
+);
+CREATE INDEX IF NOT EXISTS ix_coaching_insights_generated ON coaching_insights(generated_at DESC);
+
 -- Per-call coaching scores from the nightly scoring pipeline.
 -- The cron downloads the MP3 via /telecom/v2/.../recording, transcribes
 -- via OpenAI Whisper, scores via Claude Sonnet 4.5 against an
