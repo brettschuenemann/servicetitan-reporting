@@ -271,9 +271,14 @@ def _render_audience(audience: str, label: str, positive_label: str) -> None:
     cv4.metric(
         "Customer-match rate",
         f"{100 * own_conv['match_rate']:.0f}%",
-        help=f"{own_conv['matched_calls']} of {own_conv['total_inbound']} inbound calls "
-             "matched to a known ST customer. The rest are anonymous (we can't "
-             "attribute their downstream revenue without phone-match lookup)",
+        help=(
+            f"{own_conv['matched_calls']} of {own_conv['total_inbound']} "
+            f"inbound calls matched to a known ST customer "
+            f"({own_conv['matched_direct']} direct via customer_id, "
+            f"{own_conv['matched_via_phone']} via from_phone → "
+            f"customer_contacts lookup). Remaining unmatched callers are "
+            f"truly new prospects with no record in our system yet."
+        ),
     )
 
     # Side-by-side comparison

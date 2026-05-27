@@ -268,66 +268,113 @@ def compute_conversion_stats(
 ) -> dict:
     """How effective is this audience at converting calls into paid invoices?
 
-    For each inbound, customer-matched call in `audience` over the last
-    `lookback_days`, check whether the customer had a paid invoice within
-    `attribution_days` after the call. Returns the conversion rate, the
-    attributed revenue, and the revenue per matched call.
+    For each inbound call in `audience` over the last `lookback_days`,
+    attribute it to a customer (either via `calls.customer_id` directly,
+    or by looking up `customer_contacts.phone` matching `calls.from_phone`)
+    and check whether that customer had a paid invoice within
+    `attribution_days` after the call.
 
-    Calls with no customer_id (truly anonymous callers) are excluded from
-    the denominator — we can't attribute their downstream activity without
-    a phone-match lookup. The 'matched_rate' field surfaces that gap.
+    Phone matching: last-10-digits normalization on both sides — strips
+    country code, dashes, parens, etc. so '(847) 555-1234' matches
+    '+18475551234' matches '8475551234'. Pre-warmed customer_contacts
+    table is the lookup source (980+ active customers cached).
+
+    Calls that still can't be resolved to any customer (new prospects
+    who've never appeared in ST) are excluded from the denominator.
+    The `match_rate` field surfaces what's reachable.
     """
     with conn.cursor() as cur:
-        # Total inbound (denominator ceiling) + how many we can attribute
+        # Coverage: how many inbound calls have *some* customer attribution
+        # — either direct from calls.customer_id, or via phone-match against
+        # customer_contacts. The CTE produces effective_customer_id per call.
         cur.execute(
-            """
-            SELECT
-              COUNT(*)                                AS total_inbound,
-              COUNT(c.customer_id)                    AS matched
-            FROM calls c JOIN call_scores s ON s.call_id = c.id
-            WHERE s.audience = %s
-              AND c.direction = 'Inbound'
-              AND c.received_on >= NOW() - (%s || ' day')::interval
-              AND s.error IS NULL
-            """,
-            (audience, lookback_days),
-        )
-        coverage = dict(cur.fetchone())
-
-        # Conversion among matched calls
-        cur.execute(
-            """
-            WITH attribution AS (
-              SELECT c.id,
-                EXISTS (
-                  SELECT 1 FROM invoices i
-                  WHERE i.customer_id = c.customer_id
-                    AND i.invoice_date >= (c.received_on AT TIME ZONE 'UTC')::date
-                    AND i.invoice_date <  (c.received_on AT TIME ZONE 'UTC')::date
-                                          + (%s || ' day')::interval
-                    AND i.total > 0
-                ) AS converted,
-                COALESCE((
-                  SELECT SUM(i.total) FROM invoices i
-                  WHERE i.customer_id = c.customer_id
-                    AND i.invoice_date >= (c.received_on AT TIME ZONE 'UTC')::date
-                    AND i.invoice_date <  (c.received_on AT TIME ZONE 'UTC')::date
-                                          + (%s || ' day')::interval
-                    AND i.total > 0
-                ), 0) AS revenue
+            r"""
+            WITH resolved AS (
+              SELECT
+                c.id,
+                COALESCE(
+                  c.customer_id,
+                  (
+                    SELECT cc.customer_id FROM customer_contacts cc
+                    WHERE RIGHT(REGEXP_REPLACE(COALESCE(cc.phone,''), '\D', '', 'g'), 10) =
+                          RIGHT(REGEXP_REPLACE(COALESCE(c.from_phone,''), '\D', '', 'g'), 10)
+                      AND LENGTH(RIGHT(REGEXP_REPLACE(COALESCE(c.from_phone,''), '\D', '', 'g'), 10)) = 10
+                    LIMIT 1
+                  )
+                ) AS effective_customer_id,
+                CASE WHEN c.customer_id IS NOT NULL THEN 'direct'
+                     WHEN c.from_phone IS NOT NULL THEN 'phone_match_attempt'
+                     ELSE 'no_signal' END AS resolution_method
               FROM calls c JOIN call_scores s ON s.call_id = c.id
               WHERE s.audience = %s
                 AND c.direction = 'Inbound'
                 AND c.received_on >= NOW() - (%s || ' day')::interval
                 AND s.error IS NULL
-                AND c.customer_id IS NOT NULL
+            )
+            SELECT
+              COUNT(*) AS total_inbound,
+              COUNT(effective_customer_id) AS matched,
+              COUNT(*) FILTER (WHERE resolution_method = 'direct'
+                               AND effective_customer_id IS NOT NULL) AS matched_direct,
+              COUNT(*) FILTER (WHERE resolution_method = 'phone_match_attempt'
+                               AND effective_customer_id IS NOT NULL) AS matched_via_phone
+            FROM resolved
+            """,
+            (audience, lookback_days),
+        )
+        coverage = dict(cur.fetchone())
+
+        # Conversion: did a paid invoice land in the attribution window?
+        cur.execute(
+            r"""
+            WITH resolved AS (
+              SELECT
+                c.id,
+                c.received_on,
+                COALESCE(
+                  c.customer_id,
+                  (
+                    SELECT cc.customer_id FROM customer_contacts cc
+                    WHERE RIGHT(REGEXP_REPLACE(COALESCE(cc.phone,''), '\D', '', 'g'), 10) =
+                          RIGHT(REGEXP_REPLACE(COALESCE(c.from_phone,''), '\D', '', 'g'), 10)
+                      AND LENGTH(RIGHT(REGEXP_REPLACE(COALESCE(c.from_phone,''), '\D', '', 'g'), 10)) = 10
+                    LIMIT 1
+                  )
+                ) AS effective_customer_id
+              FROM calls c JOIN call_scores s ON s.call_id = c.id
+              WHERE s.audience = %s
+                AND c.direction = 'Inbound'
+                AND c.received_on >= NOW() - (%s || ' day')::interval
+                AND s.error IS NULL
+            ),
+            attribution AS (
+              SELECT
+                r.id,
+                EXISTS (
+                  SELECT 1 FROM invoices i
+                  WHERE i.customer_id = r.effective_customer_id
+                    AND i.invoice_date >= (r.received_on AT TIME ZONE 'UTC')::date
+                    AND i.invoice_date <  (r.received_on AT TIME ZONE 'UTC')::date
+                                          + (%s || ' day')::interval
+                    AND i.total > 0
+                ) AS converted,
+                COALESCE((
+                  SELECT SUM(i.total) FROM invoices i
+                  WHERE i.customer_id = r.effective_customer_id
+                    AND i.invoice_date >= (r.received_on AT TIME ZONE 'UTC')::date
+                    AND i.invoice_date <  (r.received_on AT TIME ZONE 'UTC')::date
+                                          + (%s || ' day')::interval
+                    AND i.total > 0
+                ), 0) AS revenue
+              FROM resolved r
+              WHERE r.effective_customer_id IS NOT NULL
             )
             SELECT
               COUNT(*) FILTER (WHERE converted) AS converted_count,
               COALESCE(SUM(revenue), 0) AS total_revenue
             FROM attribution
             """,
-            (attribution_days, attribution_days, audience, lookback_days),
+            (audience, lookback_days, attribution_days, attribution_days),
         )
         result = dict(cur.fetchone())
 
@@ -342,6 +389,8 @@ def compute_conversion_stats(
         "attribution_days": attribution_days,
         "total_inbound": total,
         "matched_calls": matched,
+        "matched_direct": coverage["matched_direct"] or 0,
+        "matched_via_phone": coverage["matched_via_phone"] or 0,
         "match_rate": (matched / total) if total else 0,
         "converted_calls": converted,
         "conversion_rate": (converted / matched) if matched else 0,
