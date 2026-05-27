@@ -52,6 +52,38 @@ DEFAULT_BATCH_LIMIT = 50
 LOOKBACK_DAYS = 14
 
 
+# ---------- audience classifier (csr vs after_hours) ----------
+
+# Pure Comfort's daytime CSR coverage: M-F 08:30-16:30 Chicago time.
+# Anything outside that window is the after-hours service / AI bot handler.
+_BUSINESS_START_HHMM = (8, 30)   # 8:30 AM
+_BUSINESS_END_HHMM   = (16, 30)  # 4:30 PM
+
+
+def classify_audience(received_on) -> str:
+    """Return 'csr' or 'after_hours' for a given call timestamp.
+
+    Treats Saturday + Sunday as after-hours all day; weekday timestamps
+    outside 08:30-16:30 Chicago time are after-hours.
+    """
+    if received_on is None:
+        return "csr"
+    try:
+        from zoneinfo import ZoneInfo
+        local = received_on.astimezone(ZoneInfo("America/Chicago"))
+    except Exception:
+        local = received_on
+    # weekday(): Mon=0 ... Sun=6
+    if local.weekday() >= 5:  # Sat / Sun
+        return "after_hours"
+    minutes = local.hour * 60 + local.minute
+    start = _BUSINESS_START_HHMM[0] * 60 + _BUSINESS_START_HHMM[1]
+    end   = _BUSINESS_END_HHMM[0]   * 60 + _BUSINESS_END_HHMM[1]
+    if start <= minutes < end:
+        return "csr"
+    return "after_hours"
+
+
 # ---------- rubrics (simple prose now that tool_use enforces structure) ----------
 
 _INBOUND_RUBRIC = """You are a sales coach for Pure Comfort, an HVAC + plumbing
@@ -156,6 +188,50 @@ _OUTBOUND_TOOL = _coaching_tool(
     dim_keys=["opener", "discovery", "value_framing", "objection_handling",
               "close", "tone"],
     verdict_enum=["strong", "coachable", "weak"],
+)
+
+
+# ---------- after-hours rubric (AI bot / after-hours service) ----------
+
+_AFTER_HOURS_RUBRIC = """You are a coach evaluating Pure Comfort's after-hours
+call-handling service (a mix of an AI bot and a human after-hours service).
+Pure Comfort is an HVAC + plumbing company in Chicagoland; daytime calls
+go to a CSR, but everything outside M-F 8:30am-4:30pm CST hits this
+after-hours layer.
+
+Goal: not closing sales — the after-hours handler's job is *triage and
+intake*. Capture the customer's problem cleanly, route emergencies to a
+human / dispatcher, and set clear expectations about when someone real
+will call back.
+
+Score each dimension 1-10 with a one-line evidence quote from the transcript:
+
+1. Introduction — did the handler identify itself + the company + that
+   it's after-hours? Setting context up front matters.
+2. Issue capture — was the customer's actual problem captured clearly
+   (system type, symptom, urgency, address)?
+3. Emergency routing — did the handler correctly escalate or flag the
+   call when it should have? No-heat in winter, water leak, gas smell,
+   no-AC in summer heat — those need a human now, not a callback tomorrow.
+4. Expectations — did the handler tell the customer when someone will
+   call back, or what to do next? "Someone will call you back" with no
+   timeframe is worse than nothing.
+5. Tone — was the handler warm and human-sounding enough that the
+   customer didn't feel like they were talking to a robot or a script?
+
+Then judge OVERALL SCORE, VERDICT (well_handled / acceptable / poorly_handled),
+the single KEY MISS, what to FIX (specific instruction for tuning the bot
+or coaching the after-hours service), 1-3 WINS, and a 2-3 sentence
+COACHING SUMMARY Brett can share with the team or use to tune the bot.
+
+Submit your analysis via the submit_coaching tool.
+"""
+
+
+_AFTER_HOURS_TOOL = _coaching_tool(
+    dim_keys=["introduction", "issue_capture", "emergency_routing",
+              "expectations", "tone"],
+    verdict_enum=["well_handled", "acceptable", "poorly_handled"],
 )
 
 
@@ -310,6 +386,7 @@ def transcribe(mp3_bytes: bytes, api_key: Optional[str] = None) -> str:
 def score_transcript(
     transcript: str,
     direction: str,
+    audience: str = "csr",
     agent_name: Optional[str] = None,
     customer_name: Optional[str] = None,
     api_key: Optional[str] = None,
@@ -320,10 +397,23 @@ def score_transcript(
     tool with a strict JSON schema and forces Claude to call it. The
     response comes back as a parsed dict — no manual JSON parsing means
     no JSONDecodeError on malformed output.
+
+    Routing:
+      audience='csr' + direction='Inbound'  → inbound CSR rubric
+      audience='csr' + direction='Outbound' → outbound CSR rubric
+      audience='after_hours'                → after-hours triage rubric
+                                              (direction ignored — bot
+                                              dynamics are direction-agnostic)
     """
-    is_inbound = (direction or "").lower() == "inbound"
-    rubric = _INBOUND_RUBRIC if is_inbound else _OUTBOUND_RUBRIC
-    tool = _INBOUND_TOOL if is_inbound else _OUTBOUND_TOOL
+    if audience == "after_hours":
+        rubric = _AFTER_HOURS_RUBRIC
+        tool = _AFTER_HOURS_TOOL
+    elif (direction or "").lower() == "inbound":
+        rubric = _INBOUND_RUBRIC
+        tool = _INBOUND_TOOL
+    else:
+        rubric = _OUTBOUND_RUBRIC
+        tool = _OUTBOUND_TOOL
     client = Anthropic(api_key=api_key or os.environ["ANTHROPIC_API_KEY"])
 
     user_msg = (
@@ -351,19 +441,21 @@ def score_transcript(
     raise RuntimeError("Claude returned no tool_use block")
 
 
-def _persist_success(conn, call_id: int, transcript: str, report: dict) -> None:
+def _persist_success(conn, call_id: int, audience: str,
+                     transcript: str, report: dict) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO call_scores (
-              call_id, transcript, rubric_version,
+              call_id, audience, transcript, rubric_version,
               overall_score, verdict, key_miss, next_time,
               wins, coaching_summary, dimensions, raw_response
             ) VALUES (
-              %s, %s, %s, %s, %s, %s, %s,
+              %s, %s, %s, %s, %s, %s, %s, %s,
               %s::jsonb, %s, %s::jsonb, %s::jsonb
             )
             ON CONFLICT (call_id) DO UPDATE SET
+              audience         = EXCLUDED.audience,
               transcript       = EXCLUDED.transcript,
               rubric_version   = EXCLUDED.rubric_version,
               overall_score    = EXCLUDED.overall_score,
@@ -378,7 +470,7 @@ def _persist_success(conn, call_id: int, transcript: str, report: dict) -> None:
               scored_at        = NOW()
             """,
             (
-                call_id, transcript, RUBRIC_VERSION,
+                call_id, audience, transcript, RUBRIC_VERSION,
                 report.get("overall_score"),
                 report.get("verdict"),
                 report.get("key_miss"),
@@ -392,18 +484,19 @@ def _persist_success(conn, call_id: int, transcript: str, report: dict) -> None:
     conn.commit()
 
 
-def _persist_error(conn, call_id: int, message: str) -> None:
+def _persist_error(conn, call_id: int, audience: str, message: str) -> None:
     """Record the error so we don't loop on a poison call."""
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO call_scores (call_id, error)
-            VALUES (%s, %s)
+            INSERT INTO call_scores (call_id, audience, error)
+            VALUES (%s, %s, %s)
             ON CONFLICT (call_id) DO UPDATE SET
+              audience  = EXCLUDED.audience,
               error     = EXCLUDED.error,
               scored_at = NOW()
             """,
-            (call_id, message[:1000]),
+            (call_id, audience, message[:1000]),
         )
     conn.commit()
 
@@ -452,8 +545,9 @@ def score_calls_batch(
 
     for c in pending:
         cid = c["id"]
+        audience = classify_audience(c.get("received_on"))
         label = (
-            f"call {cid} {c['direction']}/{c['call_type'] or '—'} "
+            f"call {cid} {audience}/{c['direction']}/{c['call_type'] or '—'} "
             f"{c['duration_seconds']}s agent={c['agent_name'] or '—'}"
         )
         t0 = time.time()
@@ -463,9 +557,11 @@ def score_calls_batch(
             if not transcript or len(transcript) < 20:
                 raise RuntimeError("Transcript empty or too short — likely silent / noisy call")
             report, tin, tout = score_transcript(
-                transcript, c["direction"], c.get("agent_name"), c.get("customer_name")
+                transcript, c["direction"], audience=audience,
+                agent_name=c.get("agent_name"),
+                customer_name=c.get("customer_name"),
             )
-            _persist_success(conn, cid, transcript, report)
+            _persist_success(conn, cid, audience, transcript, report)
 
             scored += 1
             tokens_in += tin
@@ -480,7 +576,7 @@ def score_calls_batch(
             msg = f"{type(exc).__name__}: {exc}"
             progress(f"  ✗ {label}  {msg}")
             try:
-                _persist_error(conn, cid, msg)
+                _persist_error(conn, cid, audience, msg)
             except Exception:
                 # Don't let a logging failure crash the batch
                 pass

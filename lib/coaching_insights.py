@@ -19,9 +19,9 @@ from anthropic import Anthropic
 
 MODEL = "claude-opus-4-7"
 
-_SYSTEM_PROMPT = """You are a sales coach analyzing call performance for Pure Comfort
-(HVAC + plumbing service company in Chicagoland). You'll receive aggregated
-stats from the AI scoring pipeline plus a sample of low-scoring and
+_SYSTEM_PROMPT_CSR = """You are a sales coach analyzing CSR call performance for
+Pure Comfort (HVAC + plumbing service company in Chicagoland). You'll receive
+aggregated stats from the AI scoring pipeline plus a sample of low-scoring and
 high-scoring calls. Your job is to find patterns worth acting on.
 
 Output a tight markdown briefing with:
@@ -51,12 +51,50 @@ or there isn't enough data, say so rather than padding.
 """
 
 
-def _gather_brief(conn, lookback_days: int = 30) -> tuple[dict, str]:
+_SYSTEM_PROMPT_AFTER_HOURS = """You are reviewing Pure Comfort's after-hours
+call-handling (a mix of an AI bot and an after-hours service). Pure Comfort
+is HVAC + plumbing in Chicagoland; daytime calls go to a CSR, but everything
+outside M-F 8:30am-4:30pm CST hits this layer.
+
+The after-hours handler's job is triage + intake, NOT closing. Evaluate
+whether it's doing that job well. You'll get aggregated stats and samples
+of low/high-scoring calls.
+
+Output a tight markdown briefing with:
+
+## Headline
+One sentence: the most important pattern. Quantified.
+
+## What the After-Hours Layer Is Missing
+3-5 bullets on specific repeated failures: emergencies not escalated,
+issues poorly captured, customer left without callback expectations,
+robotic phrasing that lost the customer, etc. Reference real calls.
+
+## What's Working
+2-3 bullets on well-handled calls. What did the handler do that made
+the customer feel taken care of?
+
+## Tune This Week
+Top 3 concrete actions. Could be: prompt-tune the bot, add an emergency
+keyword to its routing logic, train the after-hours service on a
+specific scenario type. Phrased as "do this specific thing."
+
+KEEP IT SHORT: under 400 words. Skip filler.
+"""
+
+
+def _gather_brief(conn, lookback_days: int = 30, audience: str = "csr") -> tuple[dict, str]:
     """Pull aggregated stats + sample calls into a compact brief for Opus.
 
     Returns (metrics_dict, brief_text). brief_text is the prompt body
     we send to Claude; metrics_dict is saved for forensics.
     """
+    # Verdicts that count as "positive" depend on audience
+    positive_verdicts = (
+        ("bookable", "strong") if audience == "csr"
+        else ("well_handled",)
+    )
+
     with conn.cursor() as cur:
         # Overall stats
         cur.execute(
@@ -64,16 +102,16 @@ def _gather_brief(conn, lookback_days: int = 30) -> tuple[dict, str]:
             SELECT
               COUNT(*)                                  AS n,
               ROUND(AVG(s.overall_score)::numeric, 2)   AS avg,
-              COUNT(*) FILTER (WHERE s.verdict IN ('bookable','strong'))
-                                                        AS bookable,
+              COUNT(*) FILTER (WHERE s.verdict = ANY(%s)) AS bookable,
               COUNT(*) FILTER (WHERE s.overall_score < 4) AS weak,
               COUNT(DISTINCT c.agent_name) FILTER (WHERE c.agent_name IS NOT NULL)
                                                         AS agents
             FROM call_scores s JOIN calls c ON c.id = s.call_id
             WHERE s.error IS NULL
+              AND s.audience = %s
               AND c.received_on >= NOW() - (%s || ' day')::interval
             """,
-            (lookback_days,),
+            (list(positive_verdicts), audience, lookback_days),
         )
         overall = dict(cur.fetchone())
 
@@ -84,16 +122,17 @@ def _gather_brief(conn, lookback_days: int = 30) -> tuple[dict, str]:
               c.agent_name,
               COUNT(*) AS calls,
               ROUND(AVG(s.overall_score)::numeric, 1) AS avg,
-              COUNT(*) FILTER (WHERE s.verdict IN ('bookable','strong')) AS bookable,
+              COUNT(*) FILTER (WHERE s.verdict = ANY(%s)) AS bookable,
               COUNT(*) FILTER (WHERE s.overall_score < 4) AS weak
             FROM call_scores s JOIN calls c ON c.id = s.call_id
             WHERE s.error IS NULL
+              AND s.audience = %s
               AND c.received_on >= NOW() - (%s || ' day')::interval
               AND c.agent_name IS NOT NULL
             GROUP BY c.agent_name
             ORDER BY calls DESC
             """,
-            (lookback_days,),
+            (list(positive_verdicts), audience, lookback_days),
         )
         agents = [dict(r) for r in cur.fetchall()]
 
@@ -106,17 +145,18 @@ def _gather_brief(conn, lookback_days: int = 30) -> tuple[dict, str]:
               ROUND(AVG(s.overall_score)::numeric, 1) AS avg
             FROM call_scores s JOIN calls c ON c.id = s.call_id
             WHERE s.error IS NULL
+              AND s.audience = %s
               AND c.received_on >= NOW() - (%s || ' day')::interval
             GROUP BY c.direction, c.call_type
             ORDER BY COUNT(*) DESC
             """,
-            (lookback_days,),
+            (audience, lookback_days),
         )
         by_type = [dict(r) for r in cur.fetchall()]
 
         # Average per dimension (which areas are weakest)
         cur.execute(
-            """
+            r"""
             SELECT
               key   AS dim,
               ROUND(AVG((dims.value->>'score')::numeric), 1) AS avg
@@ -124,13 +164,14 @@ def _gather_brief(conn, lookback_days: int = 30) -> tuple[dict, str]:
             JOIN calls c ON c.id = s.call_id,
               LATERAL jsonb_each(s.dimensions) AS dims(key, value)
             WHERE s.error IS NULL
+              AND s.audience = %s
               AND c.received_on >= NOW() - (%s || ' day')::interval
               AND s.dimensions IS NOT NULL
               AND (dims.value->>'score') ~ '^-?\d+$'
             GROUP BY key
             ORDER BY avg
             """,
-            (lookback_days,),
+            (audience, lookback_days),
         )
         dimensions = [dict(r) for r in cur.fetchall()]
 
@@ -141,13 +182,14 @@ def _gather_brief(conn, lookback_days: int = 30) -> tuple[dict, str]:
                    c.direction, c.call_type, c.duration_seconds
             FROM call_scores s JOIN calls c ON c.id = s.call_id
             WHERE s.error IS NULL
+              AND s.audience = %s
               AND c.received_on >= NOW() - (%s || ' day')::interval
               AND s.overall_score < 4
               AND s.key_miss IS NOT NULL
             ORDER BY s.overall_score, c.received_on DESC
             LIMIT 12
             """,
-            (lookback_days,),
+            (audience, lookback_days),
         )
         weak_samples = [dict(r) for r in cur.fetchall()]
 
@@ -158,12 +200,13 @@ def _gather_brief(conn, lookback_days: int = 30) -> tuple[dict, str]:
                    c.agent_name, c.direction, c.call_type
             FROM call_scores s JOIN calls c ON c.id = s.call_id
             WHERE s.error IS NULL
+              AND s.audience = %s
               AND c.received_on >= NOW() - (%s || ' day')::interval
               AND s.overall_score >= 7
             ORDER BY s.overall_score DESC, c.received_on DESC
             LIMIT 6
             """,
-            (lookback_days,),
+            (audience, lookback_days),
         )
         strong_samples = [dict(r) for r in cur.fetchall()]
 
@@ -225,16 +268,19 @@ def _gather_brief(conn, lookback_days: int = 30) -> tuple[dict, str]:
     return metrics, "\n".join(lines)
 
 
-def build_insights(conn, lookback_days: int = 30) -> dict:
+def build_insights(conn, lookback_days: int = 30, audience: str = "csr") -> dict:
     """Generate insights via Opus 4.7 and persist to coaching_insights.
+
+    audience: 'csr' uses the CSR sales-coaching system prompt, 'after_hours'
+    uses the AI-bot / triage system prompt.
 
     Returns the new row as a dict with id, insights_md, etc.
     """
-    metrics, brief = _gather_brief(conn, lookback_days=lookback_days)
+    metrics, brief = _gather_brief(conn, lookback_days=lookback_days, audience=audience)
     n_calls = metrics["overall"]["n"] or 0
     if n_calls < 5:
         raise RuntimeError(
-            f"Only {n_calls} scored calls in last {lookback_days} days — "
+            f"Only {n_calls} scored {audience} calls in last {lookback_days} days — "
             "not enough data for meaningful insights yet."
         )
 
@@ -242,11 +288,14 @@ def build_insights(conn, lookback_days: int = 30) -> dict:
     if not api_key:
         raise RuntimeError("ANTHROPIC_API_KEY missing — cannot call Claude.")
 
+    system_prompt = (_SYSTEM_PROMPT_AFTER_HOURS if audience == "after_hours"
+                     else _SYSTEM_PROMPT_CSR)
+
     client = Anthropic(api_key=api_key)
     resp = client.messages.create(
         model=MODEL,
         max_tokens=1200,
-        system=_SYSTEM_PROMPT,
+        system=system_prompt,
         messages=[{"role": "user", "content": brief}],
     )
     insights_md = resp.content[0].text.strip()
@@ -255,12 +304,12 @@ def build_insights(conn, lookback_days: int = 30) -> dict:
         cur.execute(
             """
             INSERT INTO coaching_insights
-              (period_days, n_calls, insights_md, raw_brief, model,
+              (audience, period_days, n_calls, insights_md, raw_brief, model,
                tokens_in, tokens_out)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id, generated_at
             """,
-            (lookback_days, n_calls, insights_md, brief, MODEL,
+            (audience, lookback_days, n_calls, insights_md, brief, MODEL,
              resp.usage.input_tokens, resp.usage.output_tokens),
         )
         row = cur.fetchone()
@@ -269,6 +318,7 @@ def build_insights(conn, lookback_days: int = 30) -> dict:
     return {
         "id": row["id"],
         "generated_at": row["generated_at"],
+        "audience": audience,
         "period_days": lookback_days,
         "n_calls": n_calls,
         "insights_md": insights_md,
@@ -277,13 +327,15 @@ def build_insights(conn, lookback_days: int = 30) -> dict:
     }
 
 
-def load_latest_insights(conn) -> dict | None:
-    """Return the most recent coaching_insights row, or None."""
+def load_latest_insights(conn, audience: str = "csr") -> dict | None:
+    """Return the most recent coaching_insights row for the audience, or None."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, generated_at, period_days, n_calls, insights_md, "
-            "model, tokens_in, tokens_out "
-            "FROM coaching_insights ORDER BY generated_at DESC LIMIT 1"
+            "SELECT id, generated_at, audience, period_days, n_calls, "
+            "insights_md, model, tokens_in, tokens_out "
+            "FROM coaching_insights WHERE audience = %s "
+            "ORDER BY generated_at DESC LIMIT 1",
+            (audience,),
         )
         row = cur.fetchone()
     return dict(row) if row else None

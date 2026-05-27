@@ -320,10 +320,12 @@ CREATE INDEX IF NOT EXISTS ix_ai_todos_summary ON ai_summary_todos(summary_id);
 -- Cross-call coaching insights — Opus 4.7 synthesis of patterns across
 -- all scored calls in a lookback window. Cached so the Coaching page
 -- doesn't pay $0.05 per render; manually regenerated via a button.
--- Newest row is the "current" one (ORDER BY generated_at DESC LIMIT 1).
+-- Newest-per-audience row is the "current" one.
+-- audience: 'csr' (M-F 8:30am-4:30pm CST) | 'after_hours' (everything else)
 CREATE TABLE IF NOT EXISTS coaching_insights (
     id           BIGSERIAL PRIMARY KEY,
     generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    audience     TEXT NOT NULL DEFAULT 'csr',
     period_days  INTEGER NOT NULL,
     n_calls      INTEGER NOT NULL,
     insights_md  TEXT NOT NULL,
@@ -333,6 +335,8 @@ CREATE TABLE IF NOT EXISTS coaching_insights (
     tokens_out   INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_coaching_insights_generated ON coaching_insights(generated_at DESC);
+ALTER TABLE coaching_insights
+  ADD COLUMN IF NOT EXISTS audience TEXT NOT NULL DEFAULT 'csr';
 
 -- Per-call coaching scores from the nightly scoring pipeline.
 -- The cron downloads the MP3 via /telecom/v2/.../recording, transcribes
@@ -343,6 +347,7 @@ CREATE INDEX IF NOT EXISTS ix_coaching_insights_generated ON coaching_insights(g
 CREATE TABLE IF NOT EXISTS call_scores (
     call_id          BIGINT PRIMARY KEY REFERENCES calls(id) ON DELETE CASCADE,
     scored_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    audience         TEXT NOT NULL DEFAULT 'csr',
     rubric_version   TEXT NOT NULL DEFAULT 'v1',
     transcript       TEXT,
     overall_score    INTEGER,
@@ -357,6 +362,12 @@ CREATE TABLE IF NOT EXISTS call_scores (
 );
 CREATE INDEX IF NOT EXISTS ix_call_scores_scored   ON call_scores(scored_at DESC);
 CREATE INDEX IF NOT EXISTS ix_call_scores_score    ON call_scores(overall_score);
+-- audience: 'csr' (M-F 8:30am-4:30pm CST) | 'after_hours' (everything else).
+-- Lets the Coaching page query either bucket independently.
+-- ALTER runs BEFORE the index that references it so existing DBs upgrade cleanly.
+ALTER TABLE call_scores
+  ADD COLUMN IF NOT EXISTS audience TEXT NOT NULL DEFAULT 'csr';
+CREATE INDEX IF NOT EXISTS ix_call_scores_audience ON call_scores(audience);
 """
 
 
