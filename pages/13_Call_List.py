@@ -792,12 +792,12 @@ def render_row(r: dict, kind: str, call_id: int | None = None):
 
 # ---------- sections ----------
 
-# Order: missed first (most time-sensitive), then aging estimates (warm $$),
-# then memberships, then sleeping.
+# Order: missed first (most time-sensitive), then memberships (highest
+# conversion rate + recurring revenue), then aging estimates, then sleeping.
 section_specs = [
     ("missed", "📞 Missed calls", "#F34039", missed_visible),
-    ("estimate", "📋 Aging estimates (30d+)", "#8B5CF6", estimates_visible),
     ("membership", "🤝 Membership opportunities", "#0066EE", memberships_visible),
+    ("estimate", "📋 Aging estimates (30d+)", "#8B5CF6", estimates_visible),
     ("sleeping", "💤 Sleeping customers", "#F2A93B", sleeping_visible),
 ]
 

@@ -1052,8 +1052,8 @@ def _render_notification_html(
     Your call list is ready —
     <b style="color:#F34039">{counts['missed']}</b> missed call{'s' if counts['missed'] != 1 else ''},
     <b style="color:#0066EE">{counts['membership']}</b> membership opportunit{'ies' if counts['membership'] != 1 else 'y'},
-    <b style="color:#F2A93B">{counts['sleeping']}</b> sleeping customer{'s' if counts['sleeping'] != 1 else ''},
-    and <b style="color:#8B5CF6">{counts.get('estimate', 0)}</b> aging estimate{'s' if counts.get('estimate', 0) != 1 else ''}
+    <b style="color:#8B5CF6">{counts.get('estimate', 0)}</b> aging estimate{'s' if counts.get('estimate', 0) != 1 else ''},
+    and <b style="color:#F2A93B">{counts['sleeping']}</b> sleeping customer{'s' if counts['sleeping'] != 1 else ''}
     to reach out to today.
   </p>
 
