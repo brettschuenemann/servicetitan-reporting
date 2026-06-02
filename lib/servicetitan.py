@@ -96,6 +96,39 @@ class ServiceTitanClient:
             return resp.json()
         raise ServiceTitanError(f"GET {path} failed after retries")
 
+    def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        """POST to a ST endpoint. Mirrors _request's retry + auth handling."""
+        token = self._get_token()
+        url = f"{self.api_base}{path}"
+        for attempt in range(3):
+            resp = requests.post(
+                url,
+                json=body,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "ST-App-Key": self.app_key,
+                    "Content-Type": "application/json",
+                },
+                timeout=self.timeout,
+            )
+            if resp.status_code == 429:
+                wait = float(resp.headers.get("Retry-After", "2"))
+                time.sleep(min(wait, 30))
+                continue
+            if resp.status_code == 401:
+                self._token = None
+                token = self._get_token()
+                continue
+            if resp.status_code >= 400:
+                raise ServiceTitanError(
+                    f"POST {path} failed ({resp.status_code}): {resp.text[:500]}"
+                )
+            # Some ST endpoints return 204 with no body
+            if resp.status_code == 204 or not resp.content:
+                return {}
+            return resp.json()
+        raise ServiceTitanError(f"POST {path} failed after retries")
+
     def _paginate(self, path: str, params: dict[str, Any] | None = None) -> Iterator[dict[str, Any]]:
         merged = dict(params or {})
         merged.setdefault("pageSize", self.page_size)
@@ -167,6 +200,23 @@ class ServiceTitanClient:
     def get_customer_contacts(self, customer_id: int) -> list[dict[str, Any]]:
         path = f"/crm/v2/tenant/{self.tenant_id}/customers/{customer_id}/contacts"
         return list(self._paginate(path))
+
+    def create_customer_note(
+        self,
+        customer_id: int,
+        text: str,
+        pin_to_top: bool = False,
+    ) -> dict[str, Any]:
+        """Append a timestamped note to a customer record in ST.
+
+        Used by the SMS layer to push every text exchange into ST so
+        anyone viewing the customer record sees the conversation log
+        alongside calls, jobs, invoices, etc.
+
+        Returns ST's response (typically the created note's metadata).
+        """
+        path = f"/crm/v2/tenant/{self.tenant_id}/customers/{customer_id}/notes"
+        return self._post(path, {"text": text, "pinToTop": pin_to_top})
 
     def get_campaigns(self) -> list[dict[str, Any]]:
         path = f"/marketing/v2/tenant/{self.tenant_id}/campaigns"

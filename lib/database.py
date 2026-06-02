@@ -387,6 +387,83 @@ ALTER TABLE call_scores
   ADD COLUMN IF NOT EXISTS audience TEXT NOT NULL DEFAULT 'csr';
 CREATE INDEX IF NOT EXISTS ix_call_scores_audience ON call_scores(audience);
 
+-- ─────────────────────── SMS infrastructure ────────────────────────
+-- Every outbound + inbound SMS. Source of truth for thread
+-- reconstruction; also feeds the per-customer thread view + ST notes
+-- push. direction: 'outbound' (we sent) | 'inbound' (customer sent).
+-- channel: 'auto_reply' | 'sleeping_outreach' | 'reactivation' |
+--          'manual' | 'inbound_reply'
+-- status: 'queued' | 'sent' | 'delivered' | 'failed' | 'undelivered'
+CREATE TABLE IF NOT EXISTS sms_messages (
+    id              BIGSERIAL PRIMARY KEY,
+    direction       TEXT NOT NULL CHECK (direction IN ('outbound','inbound')),
+    channel         TEXT NOT NULL DEFAULT 'manual',
+    from_phone      TEXT,                       -- E.164 format
+    to_phone        TEXT NOT NULL,              -- E.164 format
+    body            TEXT NOT NULL,
+    customer_id     BIGINT,                     -- nullable; unknown for some inbound
+    related_call_id BIGINT,                     -- for auto_reply: the missed call
+    twilio_sid      TEXT UNIQUE,                -- Twilio message SID for dedup
+    status          TEXT NOT NULL DEFAULT 'queued',
+    error_code      TEXT,
+    error_message   TEXT,
+    sent_by         TEXT,                       -- 'system' | 'fey' | etc.
+    posted_to_st    BOOLEAN NOT NULL DEFAULT FALSE,
+    sent_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    delivered_at    TIMESTAMPTZ,
+    raw             JSONB                        -- full Twilio payload
+);
+CREATE INDEX IF NOT EXISTS ix_sms_messages_phone_sent
+  ON sms_messages(from_phone, to_phone, sent_at DESC);
+CREATE INDEX IF NOT EXISTS ix_sms_messages_customer
+  ON sms_messages(customer_id, sent_at DESC)
+  WHERE customer_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_sms_messages_channel
+  ON sms_messages(channel, sent_at DESC);
+
+-- TCPA opt-out tracking. Any phone here is dead to us forever.
+-- Populated when an inbound message body matches STOP/UNSUBSCRIBE
+-- /CANCEL/QUIT/END (case-insensitive, stripped). Checked before
+-- every outbound send.
+CREATE TABLE IF NOT EXISTS sms_opt_outs (
+    phone        TEXT PRIMARY KEY,              -- E.164 format
+    opted_out_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    source       TEXT NOT NULL DEFAULT 'inbound_stop',
+    notes        TEXT
+);
+
+-- Inbound messages we couldn't match to a customer_id at receive time.
+-- Surfaced in the Call List for Fey to manually link. Once linked,
+-- the corresponding sms_messages row gets its customer_id updated and
+-- this row is marked resolved.
+CREATE TABLE IF NOT EXISTS sms_unmatched (
+    id              BIGSERIAL PRIMARY KEY,
+    message_id      BIGINT NOT NULL REFERENCES sms_messages(id) ON DELETE CASCADE,
+    from_phone      TEXT NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    resolved_at     TIMESTAMPTZ,
+    linked_customer_id BIGINT
+);
+CREATE INDEX IF NOT EXISTS ix_sms_unmatched_unresolved
+  ON sms_unmatched(created_at DESC) WHERE resolved_at IS NULL;
+
+-- Outreach campaigns (sleeping + reactivation). One row per campaign;
+-- per-recipient state lives in sms_messages (channel + customer_id).
+-- kind: 'sleeping' | 'reactivation' | 'other'
+CREATE TABLE IF NOT EXISTS sms_campaigns (
+    id              BIGSERIAL PRIMARY KEY,
+    name            TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    template        TEXT NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_by      TEXT,
+    started_at      TIMESTAMPTZ,
+    completed_at    TIMESTAMPTZ,
+    recipient_count INTEGER NOT NULL DEFAULT 0,
+    sent_count      INTEGER NOT NULL DEFAULT 0,
+    reply_count     INTEGER NOT NULL DEFAULT 0,
+    dry_run         BOOLEAN NOT NULL DEFAULT TRUE
+);
 """
 
 

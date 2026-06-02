@@ -6,3 +6,4 @@ python-dotenv>=1.0
 psycopg2-binary>=2.9
 anthropic>=0.40
 markdown>=3.5
+twilio>=9.0
