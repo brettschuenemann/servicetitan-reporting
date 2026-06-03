@@ -9,7 +9,8 @@ All-time view; the page shows:
 """
 from __future__ import annotations
 
-from datetime import date
+import os
+from datetime import date, datetime, timezone
 
 import pandas as pd
 import plotly.express as px
@@ -401,6 +402,116 @@ _picked = st.selectbox(
 
 if _picked:
     picked_id = int(_label_to_id[_picked])
+
+    # AI brief — on-demand summary of this customer's full history.
+    # Different from the pre-brief feature we removed: this is TRIGGERED
+    # by an explicit user click, scoped to one customer, and limited to
+    # FACTS visible in the data. No fabrication.
+    @st.cache_data(ttl=300, show_spinner="Generating brief…")
+    def _customer_brief(cid: int) -> str:
+        import os as _os
+        api_key = _os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
+            return ""
+        import anthropic
+        # Pull structured facts
+        facts_lines = []
+        with db() as _bconn:
+            with _bconn.cursor() as _bcur:
+                _bcur.execute("""
+                    SELECT MIN(customer_name) AS name,
+                           COUNT(*) FILTER (WHERE total > 0) AS visits,
+                           SUM(total) FILTER (WHERE total > 0) AS ltv,
+                           MIN(invoice_date) FILTER (WHERE total > 0) AS first_visit,
+                           MAX(invoice_date) FILTER (WHERE total > 0) AS last_visit
+                    FROM invoices WHERE customer_id = %s
+                """, (cid,))
+                meta = _bcur.fetchone()
+                if meta:
+                    facts_lines.append(f"Customer: {meta['name']}")
+                    facts_lines.append(
+                        f"History: {meta['visits']} paid visits, "
+                        f"${float(meta['ltv'] or 0):,.0f} lifetime, "
+                        f"last visit {meta['last_visit']}"
+                    )
+                _bcur.execute("""
+                    SELECT invoice_date, total, summary FROM invoices
+                    WHERE customer_id = %s AND total > 0
+                    ORDER BY invoice_date DESC LIMIT 5
+                """, (cid,))
+                inv = list(_bcur.fetchall())
+                if inv:
+                    facts_lines.append("\nRecent invoices:")
+                    for r in inv:
+                        summ = (r['summary'] or '').replace('\n', ' ')[:100]
+                        facts_lines.append(
+                            f"  - {r['invoice_date']}: ${float(r['total']):.0f} — {summ}"
+                        )
+                _bcur.execute("""
+                    SELECT id, name, subtotal, created_on FROM estimates
+                    WHERE customer_id = %s AND status_name = 'Open' AND active = TRUE
+                    ORDER BY subtotal DESC LIMIT 3
+                """, (cid,))
+                est = list(_bcur.fetchall())
+                if est:
+                    facts_lines.append("\nOpen estimates:")
+                    for r in est:
+                        age = (datetime.now(timezone.utc) - r['created_on']).days
+                        facts_lines.append(
+                            f"  - ${float(r['subtotal']):,.0f}: "
+                            f"{(r['name'] or 'untitled')[:60]} — {age}d old"
+                        )
+                _bcur.execute("""
+                    SELECT status, active, billing_amount, from_date, to_date
+                    FROM memberships WHERE customer_id = %s
+                    ORDER BY modified_on DESC NULLS LAST LIMIT 1
+                """, (cid,))
+                mem = _bcur.fetchone()
+                if mem:
+                    flag = "ACTIVE" if mem['active'] else "INACTIVE"
+                    facts_lines.append(
+                        f"\nMembership: {flag} — ${float(mem['billing_amount'] or 0):.0f}, "
+                        f"{mem['from_date']} → {mem['to_date']}"
+                    )
+                _bcur.execute("""
+                    SELECT direction, duration_seconds, received_on FROM calls
+                    WHERE customer_id = %s ORDER BY received_on DESC LIMIT 3
+                """, (cid,))
+                calls = list(_bcur.fetchall())
+                if calls:
+                    facts_lines.append("\nRecent calls:")
+                    for r in calls:
+                        dur = int(r['duration_seconds'] or 0)
+                        facts_lines.append(
+                            f"  - {r['received_on']:%Y-%m-%d %H:%M} "
+                            f"({r['direction']}, {dur}s)"
+                        )
+        if not facts_lines:
+            return ""
+
+        SYSTEM = """You write a 3-line brief about an HVAC customer for Pure Comfort's CSR team. Output exactly three short bold-labeled lines:
+
+**Who:** one-sentence relationship snapshot.
+**Open:** one sentence on the most actionable open thread (estimate, expired membership, etc.); say "Nothing outstanding." if none.
+**Angle:** one sentence with a pragmatic, NOT-salesy suggested approach if Fey were calling them today.
+
+Use ONLY facts provided. Never invent equipment brands, prices, urgency, etc. Each line under 30 words. Plain markdown only — no preamble."""
+        try:
+            client = anthropic.Anthropic(api_key=api_key)
+            resp = client.messages.create(
+                model="claude-sonnet-4-5",
+                max_tokens=400,
+                system=SYSTEM,
+                messages=[{"role": "user", "content": "\n".join(facts_lines)}],
+            )
+            return next((b.text for b in resp.content if b.type == "text"), "").strip()
+        except Exception as exc:
+            return f"_AI brief failed: {exc}_"
+
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        with st.expander("🤖 AI brief", expanded=True):
+            st.markdown(_customer_brief(picked_id) or "_(no data to summarize)_")
+
     with db() as _dconn:
         with _dconn.cursor() as _dcur:
             # Recent invoices

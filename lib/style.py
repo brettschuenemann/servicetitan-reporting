@@ -96,6 +96,7 @@ NAV_GROUPS: list[tuple[str, list[tuple[str, str, str]]]] = [
     ("Daily workflow", [
         ("pages/13_Call_List.py",        "Call list",         "📞"),
         ("pages/16_Texts.py",            "Texts",             "💬"),
+        ("pages/18_SMS_Admin.py",        "SMS admin",         "📤"),
         ("pages/14_Todo.py",             "Jake's todo",       "🎯"),
         ("pages/12_Outcomes.py",         "Outcomes",          "📝"),
     ]),
