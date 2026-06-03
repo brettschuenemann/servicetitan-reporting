@@ -387,6 +387,15 @@ ALTER TABLE call_scores
   ADD COLUMN IF NOT EXISTS audience TEXT NOT NULL DEFAULT 'csr';
 CREATE INDEX IF NOT EXISTS ix_call_scores_audience ON call_scores(audience);
 
+-- Reply attribution: tie outbound messages to a campaign so we can
+-- count replies per batch. Set on outbound at send time; set on
+-- inbound at receive time by looking back for a recent outbound to
+-- the same phone.
+ALTER TABLE sms_messages
+  ADD COLUMN IF NOT EXISTS campaign_id BIGINT REFERENCES sms_campaigns(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS ix_sms_messages_campaign
+  ON sms_messages(campaign_id) WHERE campaign_id IS NOT NULL;
+
 -- ─────────────────────── SMS infrastructure ────────────────────────
 -- Every outbound + inbound SMS. Source of truth for thread
 -- reconstruction; also feeds the per-customer thread view + ST notes

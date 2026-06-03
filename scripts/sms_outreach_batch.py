@@ -297,6 +297,7 @@ def main() -> int:
                     channel=args.kind,  # 'sleeping' or 'reactivation'
                     customer_id=r.get("customer_id"),
                     related_call_id=None,
+                    campaign_id=campaign_id,
                     sent_by=f"campaign:{name}",
                     post_to_st=bool(r.get("customer_id")),
                     st_client=st_client,

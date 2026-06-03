@@ -183,6 +183,7 @@ def send_sms(
     channel: str = "manual",
     customer_id: Optional[int] = None,
     related_call_id: Optional[int] = None,
+    campaign_id: Optional[int] = None,
     sent_by: str = "system",
     post_to_st: bool = True,
     st_client: Any = None,
@@ -204,6 +205,7 @@ def send_sms(
             conn, direction="outbound", channel=channel,
             from_phone=_from_number_safe(), to_phone=to_norm, body=body,
             customer_id=customer_id, related_call_id=related_call_id,
+            campaign_id=campaign_id,
             twilio_sid=None, status="opted_out",
             error_code="OPTED_OUT", error_message="recipient on sms_opt_outs",
             sent_by=sent_by, posted_to_st=False, raw=None,
@@ -216,6 +218,7 @@ def send_sms(
             conn, direction="outbound", channel=channel,
             from_phone=from_n, to_phone=to_norm, body=body,
             customer_id=customer_id, related_call_id=related_call_id,
+            campaign_id=campaign_id,
             twilio_sid=None, status="dry_run",
             error_code=None, error_message=None,
             sent_by=sent_by, posted_to_st=False,
@@ -235,6 +238,7 @@ def send_sms(
             conn, direction="outbound", channel=channel,
             from_phone=from_n, to_phone=to_norm, body=body,
             customer_id=customer_id, related_call_id=related_call_id,
+            campaign_id=campaign_id,
             twilio_sid=None, status="failed",
             error_code=type(exc).__name__, error_message=str(exc)[:500],
             sent_by=sent_by, posted_to_st=False, raw=None,
@@ -244,6 +248,7 @@ def send_sms(
         conn, direction="outbound", channel=channel,
         from_phone=from_n, to_phone=to_norm, body=body,
         customer_id=customer_id, related_call_id=related_call_id,
+        campaign_id=campaign_id,
         twilio_sid=msg.sid, status=str(msg.status or "queued"),
         error_code=None, error_message=None,
         sent_by=sent_by, posted_to_st=False,
@@ -292,14 +297,45 @@ def record_inbound(
 
     customer_id = match_customer_by_phone(conn, from_norm)
 
+    # Reply attribution: was this inbound preceded by an outbound from a
+    # campaign in the last 14 days? If so, tag this inbound with that
+    # campaign_id and increment the campaign's reply_count.
+    attributed_campaign_id = None
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT campaign_id FROM sms_messages
+            WHERE direction = 'outbound'
+              AND campaign_id IS NOT NULL
+              AND RIGHT(REGEXP_REPLACE(to_phone, '\\D', '', 'g'), 10)
+                  = RIGHT(REGEXP_REPLACE(%s, '\\D', '', 'g'), 10)
+              AND sent_at >= NOW() - INTERVAL '14 days'
+            ORDER BY sent_at DESC LIMIT 1
+            """,
+            (from_norm,),
+        )
+        result = cur.fetchone()
+        if result:
+            attributed_campaign_id = result["campaign_id"]
+
     row = _persist(
         conn, direction="inbound", channel="inbound_reply",
         from_phone=from_norm, to_phone=to_norm, body=body,
         customer_id=customer_id, related_call_id=None,
+        campaign_id=attributed_campaign_id,
         twilio_sid=twilio_sid, status="received",
         error_code=None, error_message=None,
         sent_by=None, posted_to_st=False, raw=raw,
     )
+
+    # Bump the campaign's reply_count for visibility on SMS admin page
+    if attributed_campaign_id:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE sms_campaigns SET reply_count = reply_count + 1 WHERE id = %s",
+                (attributed_campaign_id,),
+            )
+        conn.commit()
 
     # Unmatched bucket
     if customer_id is None:
@@ -349,15 +385,17 @@ def _format_st_note(direction: str, body: str, sender: Optional[str]) -> str:
 def _persist(conn, **fields) -> dict:
     raw_val = fields.pop("raw", None)
     raw_json = json.dumps(raw_val) if raw_val is not None else None
+    fields.setdefault("campaign_id", None)
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO sms_messages
               (direction, channel, from_phone, to_phone, body,
-               customer_id, related_call_id, twilio_sid, status,
+               customer_id, related_call_id, campaign_id, twilio_sid, status,
                error_code, error_message, sent_by, posted_to_st, raw)
             VALUES (%(direction)s, %(channel)s, %(from_phone)s, %(to_phone)s, %(body)s,
-                    %(customer_id)s, %(related_call_id)s, %(twilio_sid)s, %(status)s,
+                    %(customer_id)s, %(related_call_id)s, %(campaign_id)s,
+                    %(twilio_sid)s, %(status)s,
                     %(error_code)s, %(error_message)s, %(sent_by)s, %(posted_to_st)s, %(raw)s)
             RETURNING id, sent_at
             """,

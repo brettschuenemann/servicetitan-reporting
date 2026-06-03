@@ -25,6 +25,7 @@ from lib.servicetitan import ServiceTitanClient
 from lib.sms import (
     send_sms, normalize_phone, dry_run_enabled, record_opt_out,
 )
+from lib.sms_ai import personalize_message, render_customer_facts
 from lib.style import apply_mobile_styles, page_header
 from lib.auth import require_password
 
@@ -80,8 +81,18 @@ with tab1:
         )
 
     template = SLEEPING_TEMPLATE if kind == "sleeping" else REACTIVATION_TEMPLATE
+
+    use_ai = st.checkbox(
+        "🤖 Use AI personalization (one unique message per recipient)",
+        value=False,
+        help="Costs ~$0.003 per recipient. Best for sleeping batches where "
+             "we have rich history data. Skip for cold reactivation.",
+    )
     with st.expander("📝 Template", expanded=False):
         st.code(template, language=None)
+        if use_ai:
+            st.caption("⚠️ Template ignored when AI personalization is on — "
+                       "Claude writes a unique message per recipient.")
 
     if st.button("🔍 Preview recipients", use_container_width=False):
         with db() as conn:
@@ -90,10 +101,26 @@ with tab1:
             else:
                 recipients = select_reactivation(conn, int(batch_size))
 
+        # If AI personalization is on, pre-render each message NOW (in
+        # preview-build, not on every page render). Store the message body
+        # on each recipient dict so the send-loop uses it verbatim.
+        if use_ai and recipients:
+            progress = st.progress(0.0, text="Personalizing messages…")
+            for i, r in enumerate(recipients):
+                facts = render_customer_facts(r)
+                msg = personalize_message(facts)
+                # Ensure STOP suffix if Claude omitted it
+                if msg and "STOP" not in msg.upper():
+                    msg = msg.rstrip(". ") + ". Reply STOP to opt out."
+                r["_ai_body"] = msg or ""
+                progress.progress((i + 1) / len(recipients))
+            progress.empty()
+
         st.session_state["sms_preview"] = {
             "kind": kind,
             "template": template,
             "recipients": recipients,
+            "use_ai": use_ai,
         }
 
     preview = st.session_state.get("sms_preview")
@@ -104,11 +131,14 @@ with tab1:
 
         for r in recipients:
             phone = normalize_phone(r.get("phone"))
-            first = _first_name(r.get("customer_name"))
-            lv_phrase = _last_visit_phrase(r.get("last_visit"))
-            body = preview["template"].format(
-                first_name=first, last_visit_phrase=lv_phrase,
-            )
+            if preview.get("use_ai") and r.get("_ai_body"):
+                body = r["_ai_body"]
+            else:
+                first = _first_name(r.get("customer_name"))
+                lv_phrase = _last_visit_phrase(r.get("last_visit"))
+                body = preview["template"].format(
+                    first_name=first, last_visit_phrase=lv_phrase,
+                )
             phone_disp = phone or "❌ unparseable"
             name = r.get("customer_name") or "(no name)"
             ltv = float(r.get("lifetime_revenue") or 0)
@@ -179,17 +209,21 @@ with tab1:
                             if not phone:
                                 skipped += 1
                                 continue
-                            first = _first_name(r.get("customer_name"))
-                            body = preview["template"].format(
-                                first_name=first,
-                                last_visit_phrase=_last_visit_phrase(r.get("last_visit")),
-                            )
+                            if preview.get("use_ai") and r.get("_ai_body"):
+                                body = r["_ai_body"]
+                            else:
+                                first = _first_name(r.get("customer_name"))
+                                body = preview["template"].format(
+                                    first_name=first,
+                                    last_visit_phrase=_last_visit_phrase(r.get("last_visit")),
+                                )
                             try:
                                 row = send_sms(
                                     conn,
                                     to_phone=phone, body=body,
                                     channel=preview["kind"],
                                     customer_id=r.get("customer_id"),
+                                    campaign_id=campaign_id,
                                     sent_by=f"campaign:{campaign_name}",
                                     post_to_st=bool(r.get("customer_id")),
                                     st_client=st_client,

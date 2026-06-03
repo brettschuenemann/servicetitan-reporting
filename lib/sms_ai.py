@@ -118,6 +118,74 @@ def suggest_reply(messages: list[dict], model: Optional[str] = None) -> dict:
     return {"intent": intent, "suggested_reply": reply}
 
 
+# ── Batch personalization ────────────────────────────────────────
+
+_PERSONALIZE_SYSTEM = """You write ONE personalized text-message for Pure Comfort (HVAC + plumbing in Chicagoland) to send to a past customer or lead. You are given structured facts about that customer.
+
+Your output is a SINGLE TEXT MESSAGE — no preamble, no quoting, no markdown — that:
+- Greets them by first name (if you can derive it from the customer name field)
+- References something SPECIFIC and TRUE from the facts (last service date, equipment serviced, length of relationship, lifetime spend tier — pick what fits naturally)
+- Has a clear, soft CTA (offer a tune-up / check-in / scheduling) — not pushy
+- Ends with "Reply STOP to opt out."
+- Is under 320 characters
+- Sounds like a human CSR named Fey — warm, brief, no corporate boilerplate
+
+Hard rules:
+- ONLY reference facts in the input. No invented equipment brands, prices, tech names, urgency, etc.
+- If the only fact is "they got an estimate but never paid", do NOT mention the estimate amount unless it's in the input.
+- If the customer name looks like a business (Inc/LLC/Corp/etc.), use "there" instead of a first name.
+- For high-LTV ($5k+) customers, lean on relationship ("good to reach out — we've been working together since X").
+- For low-LTV / unconverted leads, be lighter — "noticed we connected a while back" not "we miss you".
+
+Output ONLY the message text — nothing else."""
+
+
+def personalize_message(facts_text: str, model: Optional[str] = None) -> str:
+    """Generate one personalized SMS body from a customer facts blob.
+
+    Returns the message text, or empty string on any failure (caller should
+    fall back to the template).
+    """
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key or not facts_text:
+        return ""
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        resp = client.messages.create(
+            model=model or os.environ.get("SMS_AI_MODEL") or _MODEL,
+            max_tokens=300,
+            system=_PERSONALIZE_SYSTEM,
+            messages=[{"role": "user", "content": facts_text}],
+        )
+        text = next((b.text for b in resp.content if b.type == "text"), "").strip()
+        # Quick safety: strip code fences if model added them
+        if text.startswith("```"):
+            text = text.strip("`").strip()
+        return text
+    except Exception as exc:
+        print(f"[sms_ai] personalize_message failed: {exc}")
+        return ""
+
+
+def render_customer_facts(recipient: dict) -> str:
+    """Render a recipient dict (from select_sleeping/select_reactivation)
+    into the structured-facts blob the personalizer expects."""
+    name = recipient.get("customer_name") or "Customer"
+    ltv = float(recipient.get("lifetime_revenue") or 0)
+    last_visit = recipient.get("last_visit")
+    lines = [f"Customer name: {name}"]
+    if ltv:
+        lines.append(f"Lifetime spend: ${ltv:,.0f}")
+    if last_visit:
+        lines.append(f"Last visit: {last_visit.strftime('%B %Y')}")
+    src = recipient.get("source")
+    if src == "estimate":
+        lines.append("Source: prior estimate (never converted)")
+    elif src == "inbound_call":
+        lines.append("Source: prior inbound call (never converted)")
+    return "\n".join(lines)
+
+
 # Intent → emoji + color hint for the UI
 INTENT_META = {
     "schedule_new":    ("📅", "#0066EE", "Schedule new service"),
