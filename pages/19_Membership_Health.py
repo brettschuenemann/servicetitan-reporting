@@ -46,13 +46,22 @@ def topline() -> dict:
         with conn.cursor() as cur:
             cur.execute("""
                 WITH active AS (
-                  SELECT id, customer_id, to_date, billing_amount,
-                         from_date
+                  SELECT id, customer_id, to_date, billing_amount, from_date
                   FROM memberships
                   WHERE active = TRUE AND to_date IS NOT NULL
+                ),
+                -- Customer is over-covered for THIS membership if they have
+                -- ANY other membership extending past this one's end date.
+                uncovered AS (
+                  SELECT a.* FROM active a
+                  WHERE NOT EXISTS (
+                    SELECT 1 FROM memberships m2
+                    WHERE m2.customer_id = a.customer_id
+                      AND m2.id <> a.id
+                      AND m2.to_date > a.to_date
+                  )
                 )
                 SELECT
-                  -- Live count + breakdowns by expiration window
                   COUNT(*) FILTER (WHERE to_date >= CURRENT_DATE) AS active_now,
                   COUNT(*) FILTER (WHERE to_date BETWEEN CURRENT_DATE
                                                      AND CURRENT_DATE + INTERVAL '30 days') AS exp_30,
@@ -60,10 +69,9 @@ def topline() -> dict:
                                                      AND CURRENT_DATE + INTERVAL '60 days') AS exp_60,
                   COUNT(*) FILTER (WHERE to_date BETWEEN CURRENT_DATE + INTERVAL '61 days'
                                                      AND CURRENT_DATE + INTERVAL '90 days') AS exp_90,
-                  -- $ at risk in next 90d (assume annual values × 1)
                   COALESCE(SUM(billing_amount) FILTER (WHERE to_date BETWEEN CURRENT_DATE
                                                        AND CURRENT_DATE + INTERVAL '90 days'), 0)::numeric AS at_risk_dollars
-                FROM active
+                FROM uncovered
             """)
             return dict(cur.fetchone())
 
@@ -109,10 +117,19 @@ def expiring_soon(days_out: int = 30) -> pd.DataFrame:
                   WHERE customer_name IS NOT NULL AND customer_id IS NOT NULL
                   GROUP BY customer_id
                 ),
-                future_renewal AS (
-                  SELECT DISTINCT m.customer_id
-                  FROM memberships m
-                  WHERE m.from_date > CURRENT_DATE
+                -- A customer is "already covered" if they have ANY other
+                -- membership (not just future-dated ones — many renewals
+                -- start BEFORE the old one expires) whose end date extends
+                -- past the expiring item's end date.
+                covered AS (
+                  SELECT DISTINCT e.membership_id
+                  FROM expiring e
+                  WHERE EXISTS (
+                    SELECT 1 FROM memberships m2
+                    WHERE m2.customer_id = e.customer_id
+                      AND m2.id <> e.membership_id
+                      AND m2.to_date > e.to_date
+                  )
                 )
                 SELECT e.customer_id, e.membership_id, e.from_date, e.to_date,
                        e.billing_amount, e.billing_frequency,
@@ -120,7 +137,7 @@ def expiring_soon(days_out: int = 30) -> pd.DataFrame:
                        COALESCE(ltv.lifetime_revenue, 0)::numeric AS lifetime_revenue,
                        ltv.last_visit, ltv.visits,
                        (e.to_date - CURRENT_DATE) AS days_to_expiry,
-                       (e.customer_id IN (SELECT customer_id FROM future_renewal)) AS already_renewed
+                       (e.membership_id IN (SELECT membership_id FROM covered)) AS already_renewed
                 FROM expiring e
                 LEFT JOIN ltv ON ltv.customer_id = e.customer_id
                 LEFT JOIN nm ON nm.customer_id = e.customer_id
@@ -192,18 +209,27 @@ def recently_lapsed(days_back: int = 90) -> pd.DataFrame:
         with conn.cursor() as cur:
             cur.execute("""
                 WITH lapsed AS (
-                  SELECT m.customer_id, MAX(m.to_date) AS lapsed_on,
-                         MAX(m.billing_amount) AS billing_amount
+                  -- Most recent lapsed membership per customer
+                  SELECT DISTINCT ON (m.customer_id)
+                         m.customer_id, m.id AS membership_id,
+                         m.to_date AS lapsed_on, m.billing_amount
                   FROM memberships m
                   WHERE m.to_date BETWEEN CURRENT_DATE - (%s * INTERVAL '1 day')
                                       AND CURRENT_DATE - INTERVAL '1 day'
-                  GROUP BY m.customer_id
+                  ORDER BY m.customer_id, m.to_date DESC
                 ),
-                renewed AS (
-                  -- Customer is NOT lapsed if they have any membership
-                  -- whose from_date is after their last lapse
-                  SELECT DISTINCT m2.customer_id FROM memberships m2
-                  WHERE m2.from_date >= CURRENT_DATE - (%s * INTERVAL '1 day')
+                -- Suppress if customer has ANY other membership still valid
+                -- (running past today). Catches both future-dated renewals
+                -- AND already-active ones that overlap.
+                still_covered AS (
+                  SELECT DISTINCT l.customer_id
+                  FROM lapsed l
+                  WHERE EXISTS (
+                    SELECT 1 FROM memberships m2
+                    WHERE m2.customer_id = l.customer_id
+                      AND m2.id <> l.membership_id
+                      AND m2.to_date > CURRENT_DATE
+                  )
                 ),
                 ltv AS (
                   SELECT customer_id, SUM(total)::numeric AS lifetime_revenue
@@ -213,18 +239,16 @@ def recently_lapsed(days_back: int = 90) -> pd.DataFrame:
                   SELECT customer_id, MIN(customer_name) AS name FROM invoices
                   WHERE customer_name IS NOT NULL GROUP BY customer_id
                 )
-                SELECT l.*, nm.name AS customer_name,
+                SELECT l.customer_id, l.membership_id, l.lapsed_on, l.billing_amount,
+                       nm.name AS customer_name,
                        COALESCE(ltv.lifetime_revenue, 0)::numeric AS lifetime_revenue,
                        (CURRENT_DATE - l.lapsed_on) AS days_since_lapse
                 FROM lapsed l
                 LEFT JOIN ltv ON ltv.customer_id = l.customer_id
                 LEFT JOIN nm ON nm.customer_id = l.customer_id
-                WHERE l.customer_id NOT IN (
-                  SELECT customer_id FROM memberships
-                  WHERE from_date > l.lapsed_on
-                )
+                WHERE l.customer_id NOT IN (SELECT customer_id FROM still_covered)
                 ORDER BY ltv.lifetime_revenue DESC NULLS LAST, l.lapsed_on DESC
-            """, (days_back, days_back))
+            """, (days_back,))
             return pd.DataFrame([dict(r) for r in cur.fetchall()])
 
 lapsed = recently_lapsed(90)
