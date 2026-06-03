@@ -387,6 +387,15 @@ ALTER TABLE call_scores
   ADD COLUMN IF NOT EXISTS audience TEXT NOT NULL DEFAULT 'csr';
 CREATE INDEX IF NOT EXISTS ix_call_scores_audience ON call_scores(audience);
 
+-- AI-classified intent for each scored call. Populated by
+-- scripts/classify_call_intents.py off the existing transcript.
+-- Intent vocabulary intentionally matches sms_ai.py for consistency.
+ALTER TABLE call_scores
+  ADD COLUMN IF NOT EXISTS intent TEXT,
+  ADD COLUMN IF NOT EXISTS intent_classified_at TIMESTAMPTZ;
+CREATE INDEX IF NOT EXISTS ix_call_scores_intent ON call_scores(intent)
+  WHERE intent IS NOT NULL;
+
 -- Reply attribution: tie outbound messages to a campaign so we can
 -- count replies per batch. Set on outbound at send time; set on
 -- inbound at receive time by looking back for a recent outbound to

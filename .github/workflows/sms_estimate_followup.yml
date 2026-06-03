@@ -1,0 +1,33 @@
+name: SMS — aging estimate follow-up
+
+# Daily check for estimates at 14/30/45 days old; send progressively
+# warmer SMS check-ins. Skips opted-out + already-booked customers.
+
+on:
+  schedule:
+    - cron: '0 15 * * 1-5'   # 10 AM CT weekdays
+  workflow_dispatch:
+
+jobs:
+  followup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - run: pip install -r requirements.txt
+      - name: Run estimate follow-up
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ST_APP_KEY: ${{ secrets.ST_APP_KEY }}
+          ST_TENANT_ID: ${{ secrets.ST_TENANT_ID }}
+          ST_CLIENT_ID: ${{ secrets.ST_CLIENT_ID }}
+          ST_CLIENT_SECRET: ${{ secrets.ST_CLIENT_SECRET }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM_NUMBER: ${{ secrets.TWILIO_FROM_NUMBER }}
+          SMS_DRY_RUN: ${{ secrets.SMS_DRY_RUN }}
+        run: python scripts/sms_estimate_followup.py

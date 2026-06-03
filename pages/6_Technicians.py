@@ -195,3 +195,85 @@ recent_display = recent.assign(
     }
 )[["Job created", "Tech", "Customer", "Status", "Invoice", "Job ID"]]
 st.dataframe(recent_display, use_container_width=True, hide_index=True, height=400)
+
+
+# ──────────────── Callback-sourced revenue ────────────────────────
+# Revenue attributed to jobs that started from Fey's outreach (SMS
+# or call-list outcome) — separates "tech got assigned a job" from
+# "tech closed a job that originated from the CSR pipeline".
+st.divider()
+st.subheader("💬 Callback-sourced revenue")
+st.caption(
+    "Jobs where the customer had a Fey-initiated SMS or call-list "
+    "outcome in the 30 days BEFORE the job was created. Measures which "
+    "techs are closing the leads our CSR pipeline generates."
+)
+
+@st.cache_data(ttl=120, show_spinner=False)
+def load_callback_attribution(s: date, e: date) -> pd.DataFrame:
+    with db() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH outreach AS (
+              -- Either an outbound SMS or a recorded CSR outcome counts as
+              -- Fey-initiated touch. Use the touch_at as the lookback anchor.
+              SELECT customer_id, MAX(sent_at) AS touch_at
+              FROM sms_messages
+              WHERE direction = 'outbound' AND customer_id IS NOT NULL
+              GROUP BY customer_id
+              UNION ALL
+              SELECT customer_id, MAX(recorded_at)
+              FROM csr_customer_outcomes
+              WHERE customer_id IS NOT NULL
+              GROUP BY customer_id
+            ),
+            customer_touches AS (
+              SELECT customer_id, MAX(touch_at) AS last_touch
+              FROM outreach GROUP BY customer_id
+            ),
+            attributed_jobs AS (
+              SELECT j.id AS job_id, j.customer_id, j.created_on
+              FROM jobs j
+              JOIN customer_touches t ON t.customer_id = j.customer_id
+              WHERE j.created_on::date BETWEEN %s AND %s
+                AND j.created_on >= t.last_touch
+                AND j.created_on <= t.last_touch + INTERVAL '30 days'
+            )
+            SELECT aa.technician_name,
+                   COUNT(DISTINCT aj.job_id) AS callback_jobs,
+                   COUNT(DISTINCT aj.job_id) FILTER (WHERE i.total > 0) AS paid,
+                   COALESCE(SUM(i.total) FILTER (WHERE i.total > 0), 0)::numeric AS revenue
+            FROM attributed_jobs aj
+            JOIN appointment_assignments aa ON aa.job_id = aj.job_id
+            LEFT JOIN jobs j ON j.id = aj.job_id
+            LEFT JOIN invoices i ON i.id = j.invoice_id
+            WHERE aa.technician_name IS NOT NULL
+              AND aa.technician_name <> 'Imported Default Technician'
+            GROUP BY aa.technician_name
+            ORDER BY revenue DESC
+            """, (s, e),
+        )
+        return pd.DataFrame([dict(r) for r in cur.fetchall()])
+
+cb = load_callback_attribution(start, end)
+if cb.empty:
+    st.info(
+        "No callback-attributed jobs in this date range yet. Once the SMS "
+        "infrastructure goes live + CSR outcomes accumulate, this fills in."
+    )
+else:
+    cb["revenue"] = cb["revenue"].astype(float)
+    cb["conversion"] = (cb["paid"] / cb["callback_jobs"].replace(0, float("nan")) * 100).round(0)
+    cb_display = cb.assign(
+        revenue=lambda d: d["revenue"].map(lambda v: f"${v:,.0f}"),
+        conversion=lambda d: d["conversion"].map(lambda v: f"{v:.0f}%" if pd.notna(v) else "—"),
+    ).rename(columns={
+        "technician_name": "Tech",
+        "callback_jobs": "Callback jobs",
+        "paid": "Paid",
+        "revenue": "Revenue",
+        "conversion": "Conv. rate",
+    })[["Tech", "Callback jobs", "Paid", "Revenue", "Conv. rate"]]
+    st.dataframe(cb_display, use_container_width=True, hide_index=True)
+    total_cb_rev = float(cb["revenue"].sum())
+    st.caption(f"**Total callback-sourced revenue this window:** ${total_cb_rev:,.0f}")

@@ -1,0 +1,26 @@
+name: Classify call intents
+
+# Runs nightly to classify any newly-scored calls. Idempotent — only
+# touches rows with a transcript and no intent yet.
+
+on:
+  schedule:
+    - cron: '0 9 * * *'   # 4 AM CT daily, after the call scoring cron
+  workflow_dispatch:
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - run: pip install -r requirements.txt
+      - name: Classify intents
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python scripts/classify_call_intents.py --limit 300

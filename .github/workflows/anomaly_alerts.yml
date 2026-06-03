@@ -1,0 +1,31 @@
+name: Daily anomaly alerts
+
+# Once a day, compare yesterday's revenue, call volume, and membership
+# signups to the rolling 30-day baseline. Email Brett if any metric
+# is >2σ off. Silent if everything's within normal range.
+
+on:
+  schedule:
+    - cron: '0 14 * * *'   # 9 AM CT / 10 AM CDT daily
+  workflow_dispatch:
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - run: pip install -r requirements.txt
+      - name: Run anomaly detector
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+        run: python scripts/anomaly_alerts.py
