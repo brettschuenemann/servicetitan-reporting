@@ -1,0 +1,37 @@
+name: SMS — inbound message poll
+
+# Pulls new inbound SMS from Twilio every 5 minutes, records them in
+# Postgres, handles STOP opt-outs, and pushes matched ones as notes
+# on the corresponding ST customer record.
+#
+# Exits cleanly with no work if TWILIO_ACCOUNT_SID isn't set, so it's
+# safe to enable this workflow before Twilio is fully configured.
+
+on:
+  schedule:
+    # Every 5 min, all day every day (replies arrive whenever)
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Poll Twilio inbound
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ST_APP_KEY: ${{ secrets.ST_APP_KEY }}
+          ST_TENANT_ID: ${{ secrets.ST_TENANT_ID }}
+          ST_CLIENT_ID: ${{ secrets.ST_CLIENT_ID }}
+          ST_CLIENT_SECRET: ${{ secrets.ST_CLIENT_SECRET }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+        run: python scripts/sms_poll_inbound.py

@@ -1,0 +1,41 @@
+name: SMS — missed-call auto-reply
+
+# Auto-text customers who called us and we missed it (Abandoned/Unbooked).
+# Runs every 5 minutes during the day; idempotent — won't re-text the same
+# phone within 24h regardless of how often this fires.
+#
+# Safety: lib/sms reads SMS_DRY_RUN to decide whether to actually send.
+# Set the GitHub repo secret SMS_DRY_RUN=1 while validating; remove (or set
+# to 0) once you trust the behavior.
+
+on:
+  schedule:
+    # Every 5 min, 13:00–23:55 UTC weekdays = 8 AM – 6 PM CDT
+    # (after-hours messages also reasonable, but limit blast radius initially)
+    - cron: '*/5 13-23 * * 1-5'
+  workflow_dispatch:
+
+jobs:
+  reply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run missed-call auto-reply
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ST_APP_KEY: ${{ secrets.ST_APP_KEY }}
+          ST_TENANT_ID: ${{ secrets.ST_TENANT_ID }}
+          ST_CLIENT_ID: ${{ secrets.ST_CLIENT_ID }}
+          ST_CLIENT_SECRET: ${{ secrets.ST_CLIENT_SECRET }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM_NUMBER: ${{ secrets.TWILIO_FROM_NUMBER }}
+          SMS_DRY_RUN: ${{ secrets.SMS_DRY_RUN }}
+        run: python scripts/sms_missed_call_reply.py
