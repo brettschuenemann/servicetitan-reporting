@@ -1173,21 +1173,16 @@ def main() -> int:
         return 0
 
     subject = f"📞 Call list ready ({total}) — {today_str}"
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = os.environ.get("EMAIL_FROM") or os.environ["SMTP_USER"]
-    msg["To"] = fmt_recipients(TO_LIST)
-    if CC_LIST:
-        msg["Cc"] = fmt_recipients(CC_LIST)
-    msg.set_content(text_body)
-    msg.add_alternative(html_body, subtype="html")
-
     all_recipients = TO_LIST + CC_LIST
     print(f"Sending notification to {fmt_recipients(all_recipients)}…")
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context()) as smtp:
-        smtp.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
-        smtp.send_message(msg, to_addrs=all_recipients)
-    print("Sent.")
+    from lib.email_send import send_email
+    result = send_email(
+        to=all_recipients,
+        subject=subject,
+        text=text_body,
+        html=html_body,
+    )
+    print(f"Sent via {result['provider']}.")
 
     with db() as conn:
         record_send(conn, "csr_daily", all_recipients)

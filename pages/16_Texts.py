@@ -22,6 +22,7 @@ load_dotenv()
 from lib.database import db
 from lib.servicetitan import ServiceTitanClient
 from lib.sms import send_sms, normalize_phone, dry_run_enabled, match_customer_by_phone
+from lib.sms_ai import suggest_reply, INTENT_META
 from lib.style import apply_mobile_styles
 
 
@@ -193,6 +194,15 @@ def load_unmatched(limit: int = 20) -> list[dict]:
             return [dict(r) for r in cur.fetchall()]
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _cached_suggestion(thread_signature: tuple) -> dict:
+    """Cache AI suggestions by thread signature so we don't re-call Claude
+    on every page render. thread_signature is a tuple of (direction, body)
+    pairs — changes when a new message arrives."""
+    msgs = [{"direction": d, "body": b} for d, b in thread_signature]
+    return suggest_reply(msgs)
+
+
 def load_active_campaigns() -> list[dict]:
     with db() as conn:
         with conn.cursor() as cur:
@@ -302,11 +312,43 @@ def render_thread(t: dict) -> None:
         )
         st.markdown(f"<div>{thread_html}</div>", unsafe_allow_html=True)
 
+        # AI suggested reply — only when latest is inbound (needs reply)
+        # and Anthropic key is available
+        prefill_key = f"prefill_{t.get('customer_id') or key_phone}"
+        if t["needs_reply"] and os.environ.get("ANTHROPIC_API_KEY"):
+            suggestion = _cached_suggestion(
+                tuple((m["direction"], m["body"] or "") for m in msgs)
+            )
+            intent = suggestion.get("intent", "unclear")
+            reply_text_ai = suggestion.get("suggested_reply", "")
+            if reply_text_ai:
+                emoji, color, label = INTENT_META.get(
+                    intent, INTENT_META["unclear"]
+                )
+                st.markdown(
+                    f"<div style='background:#F9FAFB;border-left:3px solid {color};"
+                    f"padding:8px 12px;margin:8px 0;border-radius:4px'>"
+                    f"<div style='font-size:11px;font-weight:700;color:{color};"
+                    f"text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px'>"
+                    f"🤖 Suggested reply · {emoji} {escape(label)}</div>"
+                    f"<div style='font-size:14px;color:#111827;line-height:1.45'>"
+                    f"{escape(reply_text_ai)}</div></div>",
+                    unsafe_allow_html=True,
+                )
+                if st.button("✨ Use this suggestion",
+                             key=f"use_sugg_{prefill_key}",
+                             use_container_width=False):
+                    st.session_state[prefill_key] = reply_text_ai
+                    st.rerun()
+            elif intent == "unclear":
+                st.caption("🤔 AI couldn't draft a clean reply — your turn.")
+
         # Reply input
         reply_key = f"reply_{t.get('customer_id') or key_phone}"
         reply_text = st.text_area(
             "Reply",
             key=reply_key,
+            value=st.session_state.pop(prefill_key, ""),
             placeholder="Type your reply…",
             height=80,
             label_visibility="collapsed",

@@ -114,6 +114,7 @@ NAV_GROUPS: list[tuple[str, list[tuple[str, str, str]]]] = [
     ("Customers & calls", [
         ("pages/11_Customers.py",        "Customers",         "👥"),
         ("pages/5_Calls.py",             "Calls",             "☎️"),
+        ("pages/17_Missed_Recovery.py",  "Missed recovery",   "📉"),
         ("pages/15_Call_Coaching.py",    "Call coaching",     "🎧"),
     ]),
     ("Archive", [

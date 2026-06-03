@@ -7,3 +7,4 @@ psycopg2-binary>=2.9
 anthropic>=0.40
 markdown>=3.5
 twilio>=9.0
+resend>=2.0

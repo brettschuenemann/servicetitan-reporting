@@ -189,18 +189,15 @@ def main() -> int:
     if not recipients:
         sys.exit("EMAIL_TO has no valid addresses.")
 
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["From"] = os.environ.get("EMAIL_FROM") or os.environ["SMTP_USER"]
-    msg["To"] = fmt_recipients(recipients)
-    msg.set_content(text)
-    msg.add_alternative(html, subtype="html")
-
-    print(f"Connecting to Gmail SMTP and sending to {fmt_recipients(recipients)}…")
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ssl.create_default_context()) as smtp:
-        smtp.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
-        smtp.send_message(msg, to_addrs=recipients)
-    print("Sent.")
+    print(f"Sending followups email to {fmt_recipients(recipients)}…")
+    from lib.email_send import send_email
+    result = send_email(
+        to=recipients,
+        subject=subject,
+        text=text,
+        html=html,
+    )
+    print(f"Sent via {result['provider']}.")
     with db() as conn:
         record_send(conn, "followups", recipients)
     return 0

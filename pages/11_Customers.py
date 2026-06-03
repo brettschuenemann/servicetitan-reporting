@@ -370,3 +370,119 @@ st.download_button(
     file_name="customer_lifetime.csv",
     mime="text/csv",
 )
+
+
+# ──────────────────────── Customer detail lookup ────────────────────────
+# Single-customer drill-down — useful when Fey/Jake want to scan one
+# customer's history end-to-end (invoices, calls, SMS thread).
+from html import escape as _esc
+
+st.divider()
+st.subheader("🔎 Customer detail lookup")
+st.caption("Type a customer name or ID to see their full history including SMS thread.")
+
+# Build a searchable label list once (cust is already in scope)
+_cust_labels = (
+    cust.assign(
+        label=lambda d: d["customer_name"].astype(str) + "  ·  $" +
+                        d["revenue"].round(0).astype(int).astype(str) +
+                        "  ·  id " + d["customer_id"].astype(str)
+    )
+    .sort_values("revenue", ascending=False)
+)
+_label_to_id = dict(zip(_cust_labels["label"], _cust_labels["customer_id"]))
+
+_picked = st.selectbox(
+    "Customer",
+    options=[""] + list(_cust_labels["label"]),
+    index=0,
+    label_visibility="collapsed",
+)
+
+if _picked:
+    picked_id = int(_label_to_id[_picked])
+    with db() as _dconn:
+        with _dconn.cursor() as _dcur:
+            # Recent invoices
+            _dcur.execute("""
+                SELECT invoice_date, total, summary
+                FROM invoices WHERE customer_id = %s AND total > 0
+                ORDER BY invoice_date DESC LIMIT 8
+            """, (picked_id,))
+            inv_rows = list(_dcur.fetchall())
+
+            # Recent calls
+            _dcur.execute("""
+                SELECT received_on, direction, call_type, duration_seconds, agent_name
+                FROM calls WHERE customer_id = %s
+                ORDER BY received_on DESC LIMIT 10
+            """, (picked_id,))
+            call_rows = list(_dcur.fetchall())
+
+            # SMS thread (everything we've exchanged)
+            _dcur.execute("""
+                SELECT direction, body, channel, sent_at, status, sent_by
+                FROM sms_messages WHERE customer_id = %s
+                ORDER BY sent_at ASC LIMIT 50
+            """, (picked_id,))
+            sms_rows = list(_dcur.fetchall())
+
+    # Two-col layout: timeline left, SMS right
+    cL, cR = st.columns([3, 2])
+
+    with cL:
+        st.markdown("**📄 Recent invoices**")
+        if inv_rows:
+            for r in inv_rows:
+                summ = (r.get("summary") or "(no summary)").strip()[:90]
+                st.markdown(
+                    f"<div style='padding:4px 0;border-bottom:1px solid #F1F5F9'>"
+                    f"<b>{r['invoice_date']}</b> · ${float(r['total']):,.0f}"
+                    f"<br><span style='font-size:12px;color:#6B7280'>{_esc(summ)}</span>"
+                    f"</div>", unsafe_allow_html=True,
+                )
+        else:
+            st.caption("No paid invoices on file.")
+
+        st.markdown("**☎️ Recent calls**")
+        if call_rows:
+            for r in call_rows:
+                dur = int(r.get("duration_seconds") or 0)
+                outcome = "real conv" if dur >= 90 else ("voicemail" if dur >= 30 else "no answer/hangup")
+                color = "#10B981" if dur >= 90 else ("#F59E0B" if dur >= 30 else "#9CA3AF")
+                agent = r.get("agent_name") or "(no agent)"
+                st.markdown(
+                    f"<div style='padding:4px 0;border-bottom:1px solid #F1F5F9'>"
+                    f"<b>{r['received_on']:%Y-%m-%d %H:%M}</b> · "
+                    f"<span style='color:{color}'>{_esc(r['direction'])}</span> · "
+                    f"{_esc(r['call_type'] or '?')} · {dur}s ({outcome}) · "
+                    f"<span style='color:#6B7280;font-size:12px'>{_esc(agent)}</span>"
+                    f"</div>", unsafe_allow_html=True,
+                )
+        else:
+            st.caption("No call history.")
+
+    with cR:
+        st.markdown("**💬 SMS thread**")
+        if sms_rows:
+            for m in sms_rows:
+                is_out = m["direction"] == "outbound"
+                bg = "#0066EE" if is_out else "#E5E7EB"
+                fg = "white" if is_out else "#111827"
+                align = "right" if is_out else "left"
+                margin = "margin-left:40px" if is_out else "margin-right:40px"
+                when = m["sent_at"].strftime("%b %d %H:%M")
+                channel = m.get("channel") or ""
+                meta = f"{when}" + (f" · {channel}" if channel and channel != "manual" else "")
+                st.markdown(
+                    f"<div style='margin:6px 0;{margin}'>"
+                    f"<div style='background:{bg};color:{fg};padding:6px 10px;"
+                    f"border-radius:12px;display:inline-block;max-width:95%;"
+                    f"white-space:pre-wrap;font-size:13px;line-height:1.4'>"
+                    f"{_esc(m['body'] or '')}</div>"
+                    f"<div style='font-size:10px;color:#6B7280;text-align:{align};"
+                    f"margin-top:2px'>{_esc(meta)}</div></div>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.caption("No SMS history yet for this customer.")
