@@ -563,6 +563,81 @@ if yoy_df is not None and not yoy_df.empty:
 else:
     st.info("Not enough invoice data to show a year-over-year comparison.")
 
+
+# ---------- Pace check: current-month MTD year-over-year ----------
+# The chart above sums the FULL month for prior years vs only the
+# elapsed days for this month — makes June look tiny right now.
+# This panel normalizes everyone to the same day-of-month so we can
+# tell if we're actually tracking ahead/behind.
+if yoy_df is not None and not yoy_df.empty:
+    st.subheader("Pace check — month-to-date vs same period prior years")
+    this_month_num = end.month
+    this_day = end.day
+
+    # For each year, sum invoices from this month, day <= today's day
+    mtd_rows = []
+    for y in yoy_years:
+        m_mask = (
+            (yoy_df["year"] == y)
+            & (yoy_df["month_num"] == this_month_num)
+            & (yoy_df["invoiceDate"].dt.day <= this_day)
+        )
+        mtd_rows.append({
+            "Year": str(y),
+            "Revenue": float(yoy_df.loc[m_mask, "total"].sum()),
+        })
+    mtd_df = pd.DataFrame(mtd_rows)
+
+    month_label = calendar.month_name[this_month_num]
+    st.caption(
+        f"{month_label} 1 → {month_label} {this_day} comparison across "
+        f"{' / '.join(str(y) for y in yoy_years)}."
+    )
+
+    # KPI strip — this year MTD vs prior year same period
+    cur_mtd = float(mtd_df.loc[mtd_df["Year"] == str(yoy_years[-1]), "Revenue"].iloc[0])
+    prior_mtd = float(mtd_df.loc[mtd_df["Year"] == str(yoy_years[-2]), "Revenue"].iloc[0])
+    delta_pct = ((cur_mtd - prior_mtd) / prior_mtd * 100) if prior_mtd else None
+
+    # Run-rate projection: scale MTD up to a full-month estimate
+    days_in_month = calendar.monthrange(end.year, this_month_num)[1]
+    projection = cur_mtd * (days_in_month / this_day) if this_day else cur_mtd
+
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric(f"{month_label} {yoy_years[-1]} MTD", f"${cur_mtd:,.0f}")
+    p2.metric(
+        f"{month_label} {yoy_years[-2]} same period",
+        f"${prior_mtd:,.0f}",
+        delta=f"{delta_pct:+.1f}%" if delta_pct is not None else None,
+    )
+    p3.metric(
+        f"On pace for {month_label} {yoy_years[-1]}",
+        f"${projection:,.0f}",
+        help=f"MTD × ({days_in_month} / {this_day}). Assumes steady "
+             "pace — under-counts if more bookings cluster late in month.",
+    )
+    p4.metric("Days elapsed", f"{this_day} / {days_in_month}")
+
+    # Grouped bar — same-period MTD across all years
+    fig_pace = px.bar(
+        mtd_df, x="Year", y="Revenue",
+        text=mtd_df["Revenue"].map(lambda v: f"${v/1000:.0f}k" if v >= 1000 else f"${v:.0f}"),
+        labels={"Revenue": "MTD revenue ($)"},
+        color="Year",
+        color_discrete_map={
+            str(yoy_years[-1]): "#0066EE",
+            str(yoy_years[-2]): "#94A3B8",
+            str(yoy_years[-3]): "#CBD5E1",
+        },
+    )
+    fig_pace.update_traces(textposition="outside")
+    fig_pace.update_layout(
+        margin=dict(l=0, r=0, t=10, b=0),
+        height=chart_height("default"),
+        showlegend=False,
+    )
+    st.plotly_chart(fig_pace, use_container_width=True)
+
 # ---------- Maintenance contracts (informational only) ----------
 st.divider()
 st.subheader("Maintenance contracts")
