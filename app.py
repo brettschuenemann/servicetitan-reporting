@@ -572,9 +572,22 @@ else:
 if yoy_df is not None and not yoy_df.empty:
     st.subheader("Pace check — month-to-date vs same period prior years")
     this_month_num = end.month
-    this_day = end.day
+    cur_year = yoy_years[-1]
 
-    # For each year, sum invoices from this month, day <= today's day
+    # Cap the comparison day at the LATEST actual invoice date we have for
+    # the current year + month. Otherwise we compare prior years' full
+    # months against this year's partial data (sidebar end date can be
+    # later than the most recent synced invoice).
+    cur_year_mask = (
+        (yoy_df["year"] == cur_year)
+        & (yoy_df["month_num"] == this_month_num)
+    )
+    if cur_year_mask.any():
+        this_day = int(yoy_df.loc[cur_year_mask, "invoiceDate"].dt.day.max())
+    else:
+        this_day = end.day  # no current-month data — fall back to sidebar
+
+    # For each year, sum invoices from this month, day <= our anchor day
     mtd_rows = []
     for y in yoy_years:
         m_mask = (
@@ -591,7 +604,8 @@ if yoy_df is not None and not yoy_df.empty:
     month_label = calendar.month_name[this_month_num]
     st.caption(
         f"{month_label} 1 → {month_label} {this_day} comparison across "
-        f"{' / '.join(str(y) for y in yoy_years)}."
+        f"{' / '.join(str(y) for y in yoy_years)} — anchored to the latest "
+        f"{cur_year} invoice date so prior years aren't compared against partial data."
     )
 
     # KPI strip — this year MTD vs prior year same period
