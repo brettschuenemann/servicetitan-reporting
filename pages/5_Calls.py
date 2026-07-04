@@ -351,3 +351,81 @@ else:
         ).dt.hour
         hr_counts = emerg["hour"].value_counts().sort_index()
         st.bar_chart(hr_counts, height=200)
+
+
+# ──────────────── ⚠️ Possibly misclassified calls ─────────────────
+# Calls a CSR tagged Excused/NotLead — removing them from every lead
+# metric — but whose TRANSCRIPT classifies as a lead-like intent.
+# Each one is a potentially discarded lead. Excused calls get intents
+# from the nightly coaching pipeline; NotLead calls are covered by
+# scripts/audit_call_classification.py.
+st.divider()
+st.subheader("⚠️ Possibly misclassified calls")
+st.caption(
+    "Tagged **Excused/NotLead** in ServiceTitan (excluded from lead metrics) "
+    "but the transcript reads like a real lead. Listen before re-engaging — "
+    "the classifier errs toward flagging."
+)
+
+LEAD_LIKE = ("schedule_new", "emergency", "accept_quote", "reschedule")
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_misclassified(s: date, e: date) -> pd.DataFrame:
+    with db() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT c.id, c.received_on, c.call_type, c.customer_name,
+                   c.from_phone, c.duration_seconds, c.recording_url,
+                   cs.intent, LEFT(cs.transcript, 160) AS excerpt,
+                   (c.customer_id IS NOT NULL AND EXISTS (
+                      SELECT 1 FROM invoices i
+                      WHERE i.customer_id = c.customer_id AND i.total > 0
+                        AND i.invoice_date > (c.received_on AT TIME ZONE 'UTC')::date
+                   )) AS later_paid
+            FROM calls c
+            JOIN call_scores cs ON cs.call_id = c.id
+            WHERE c.direction = 'Inbound'
+              AND c.call_type IN ('Excused', 'NotLead')
+              AND cs.intent IN %s
+              AND c.created_on::date BETWEEN %s AND %s
+            ORDER BY c.received_on DESC
+            """,
+            (LEAD_LIKE, s, e),
+        )
+        return pd.DataFrame([dict(r) for r in cur.fetchall()])
+
+mis = load_misclassified(start, end)
+if mis.empty:
+    st.caption("None found in this date range. ✅")
+else:
+    hide_recovered = st.checkbox(
+        "Hide callers who later paid us anyway",
+        value=True,
+        help="A later paid invoice means the lead was recovered through "
+             "another channel — the tag was still wrong, but no money lost.",
+    )
+    view = mis[~mis["later_paid"]] if hide_recovered else mis
+    st.caption(f"**{len(view)} flagged call(s)** "
+               f"({int(mis['later_paid'].sum())} of {len(mis)} later paid).")
+
+    view = view.copy()
+    view["When"] = pd.to_datetime(view["received_on"]).dt.tz_convert(
+        "America/Chicago").dt.strftime("%m-%d %H:%M")
+    view["Len"] = view["duration_seconds"].fillna(0).astype(int).map(lambda v: f"{v}s")
+    view["Intent"] = view["intent"].map(
+        lambda i: f"{INTENT_DISPLAY.get(i, ('','',''))[0]} "
+                  f"{INTENT_DISPLAY.get(i, ('','',i))[2]}"
+    )
+    view["Recovered"] = view["later_paid"].map(lambda v: "✓ paid later" if v else "✗ never paid")
+    view = view.rename(columns={
+        "call_type": "ST tag", "customer_name": "Customer",
+        "from_phone": "Phone", "excerpt": "Transcript start",
+        "recording_url": "Recording",
+    })[["When", "ST tag", "Intent", "Customer", "Phone", "Len",
+        "Recovered", "Transcript start", "Recording"]]
+    st.dataframe(
+        view, use_container_width=True, hide_index=True, height=420,
+        column_config={
+            "Recording": st.column_config.LinkColumn("Recording", display_text="listen"),
+        },
+    )
