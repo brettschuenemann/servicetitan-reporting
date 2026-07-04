@@ -35,13 +35,16 @@ LOOKBACK_EXCLUDE_RECENT = 1     # baseline excludes the day being checked
 # ── metrics ────────────────────────────────────────────────────────
 
 def fetch_daily_revenue(conn, start_date: date, end_date: date) -> dict[date, float]:
-    """Daily paid-invoice revenue, indexed by invoice_date."""
+    """Daily net revenue by invoice_date. Sums ALL invoices — negative
+    invoices are duplicate-billing corrections (e.g. reversed double-billed
+    MSPs) and must net against their erroneous positives, matching the
+    dashboard methodology that reconciles to the accountant."""
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT invoice_date AS d, SUM(total)::numeric AS rev
             FROM invoices
-            WHERE invoice_date BETWEEN %s AND %s AND total > 0
+            WHERE invoice_date BETWEEN %s AND %s
             GROUP BY invoice_date
             """, (start_date, end_date),
         )
