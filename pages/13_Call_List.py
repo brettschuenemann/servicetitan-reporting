@@ -13,7 +13,8 @@ import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
-from html import escape
+import re
+from html import escape, unescape
 
 import streamlit as st
 
@@ -451,6 +452,9 @@ sleeping = [r for r in sleeping_all
             if dedup_key("sleeping", r.get("customer_id")) not in suppress["sleeping"]]
 estimates_recent = [r for r in estimates_recent_all
                     if dedup_key("estimate", r.get("customer_id"), r.get("id")) not in suppress["estimate"]]
+# Recent bucket reads newest-first (the loader sorts by value; freshness
+# matters more inside the first-week close window).
+estimates_recent.sort(key=lambda r: r.get("created_on") or 0, reverse=True)
 estimates = [r for r in estimates_all
              if dedup_key("estimate", r.get("customer_id"), r.get("id")) not in suppress["estimate"]]
 
@@ -633,12 +637,16 @@ def render_row(r: dict, kind: str, call_id: int | None = None):
         value = float(r.get("subtotal") or 0)
         tech = (r.get("originating_tech") or "").strip()
         ename = (r.get("estimate_name") or "").strip()
+        bu = (r.get("business_unit_name") or "").strip()
+        job_no = (str(r.get("job_number") or "")).strip()
         primary = (
             f"<b>{fmt_money(value)}</b> estimate"
             + (f" — <i>{escape(short(ename, 60))}</i>" if ename else "")
             + (f" · sent {created:%b %d}" if created else "")
             + f" · <b>{age}d old</b>"
             + (f" · tech: {escape(tech)}" if tech else "")
+            + (f" · {escape(bu)}" if bu else "")
+            + (f" · job #{escape(job_no)}" if job_no else "")
         )
 
     # History line
@@ -671,6 +679,24 @@ def render_row(r: dict, kind: str, call_id: int | None = None):
     else:
         history = ""
 
+    # Scope-of-work block — estimate cards only. The estimate summary is
+    # the proposal text the customer received; ST stores it with HTML
+    # tags/entities, so strip to plain text before showing.
+    scope_html = ""
+    if kind == "estimate" and (r.get("summary") or "").strip():
+        scope = unescape(str(r["summary"]))
+        scope = re.sub(r"<[^>]+>", " ", scope)          # drop tags
+        scope = re.sub(r"\s+", " ", scope).strip()      # collapse whitespace
+        if scope:
+            scope_html = (
+                f"<div style='margin-top:6px;padding:6px 10px;background:#F8FAFC;"
+                f"border-left:3px solid #94A3B8;border-radius:4px;font-size:12px;"
+                f"color:#334155;line-height:1.5'>"
+                f"<span style='font-size:11px;font-weight:700;color:#64748B;"
+                f"text-transform:uppercase;letter-spacing:0.04em'>Scope</span> "
+                f"{escape(short(scope, 260))}</div>"
+            )
+
     # Render the row card
     with st.container(border=True):
         st.markdown(
@@ -678,6 +704,7 @@ def render_row(r: dict, kind: str, call_id: int | None = None):
             f"<div style='font-size:14px;margin:2px 0 4px'>{phone_html}{email_html}</div>"
             f"<div style='font-size:13px;color:#333'>{primary}</div>"
             f"<div style='font-size:12px;color:#777;margin-top:2px'>{history}</div>"
+            + scope_html
             + (
                 f"<div style='margin-top:8px;padding:8px 10px;background:#EFF6FF;"
                 f"border-left:3px solid #0066EE;border-radius:4px;font-size:13px;"
@@ -690,13 +717,11 @@ def render_row(r: dict, kind: str, call_id: int | None = None):
             unsafe_allow_html=True,
         )
 
-        # Per-row personalized script. Expanded by default so the full
-        # talking points are always in view next to this customer's data.
-        # Placeholders are replaced with the customer's actual record so
-        # Fey can read it almost verbatim.
+        # Per-row personalized script. Collapsed by default to keep cards
+        # compact — one click opens the personalized talking points.
         script_items = CALL_SCRIPTS.get(kind, [])
         if script_items:
-            with st.expander("📋 Call script", expanded=True):
+            with st.expander("📋 Call script", expanded=False):
                 for script_label, script_line in script_items:
                     personalized = _personalize_script_line(script_line, r, kind)
                     st.markdown(
