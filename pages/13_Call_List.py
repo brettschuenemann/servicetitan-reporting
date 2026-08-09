@@ -41,7 +41,6 @@ from scripts.send_csr_daily_email import (
     fmt_money,
     fmt_phone,
     load_membership_opps,
-    load_missed_calls,
     load_open_estimates,
     load_recommendation_state,
     load_sleeping_customers,
@@ -71,16 +70,16 @@ def _load_sections() -> dict:
         state = load_recommendation_state(conn)
         memberships_all = load_membership_opps(conn)
         sleeping_all = load_sleeping_customers(conn, limit=SECTION_CAPS["sleeping"] * 4)
-        missed_all = load_missed_calls(conn)
-        # 30d+ aging estimates — Jake handles the fresh ones, these are Fey's.
-        # Pull 4× the cap so suppressed/in-cooldown ones still leave a healthy
-        # bench when she clears the visible list.
+        # Fresh estimates (<30d) — quotes close in the first week or not at
+        # all, so these lead the page. Aging 30d+ stays as its own bucket.
+        estimates_recent_all = load_open_estimates(conn, min_age_days=0,
+                                                   max_age_days=30)
         estimates_all = load_open_estimates(conn, min_age_days=30)
     return {
         "state": state,
         "memberships_all": memberships_all,
         "sleeping_all": sleeping_all,
-        "missed_all": missed_all,
+        "estimates_recent_all": estimates_recent_all,
         "estimates_all": estimates_all,
     }
 
@@ -350,10 +349,10 @@ def _row_passes_filter(row: dict, kind: str, outreach: dict | None) -> bool:
     elif f == "Untouched only":
         if outreach and (outreach.get("attempts", 0) > 0 or outreach.get("called_back_at")):
             return False
-    elif f in ("Missed calls", "Memberships", "Sleeping", "Estimates"):
+    elif f in ("Memberships", "Sleeping", "Estimates"):
         # Section filter applied at the section render level — always pass
         # when filtering by kind matches; otherwise this row is hidden.
-        target_kind = {"Missed calls": "missed", "Memberships": "membership",
+        target_kind = {"Memberships": "membership",
                        "Sleeping": "sleeping", "Estimates": "estimate"}[f]
         if kind != target_kind:
             return False
@@ -442,7 +441,7 @@ first_seen_map = state["first_seen"]
 outreach_map = state["outreach"]
 memberships_all = data["memberships_all"]
 sleeping_all = data["sleeping_all"]
-missed_all = data["missed_all"]
+estimates_recent_all = data["estimates_recent_all"]
 estimates_all = data["estimates_all"]
 
 # Apply suppression
@@ -450,15 +449,15 @@ memberships = [r for r in memberships_all
                if dedup_key("membership", r.get("customer_id")) not in suppress["membership"]]
 sleeping = [r for r in sleeping_all
             if dedup_key("sleeping", r.get("customer_id")) not in suppress["sleeping"]]
-missed = [r for r in missed_all
-          if dedup_key("missed", r.get("customer_id"), r.get("id")) not in suppress["missed"]]
+estimates_recent = [r for r in estimates_recent_all
+                    if dedup_key("estimate", r.get("customer_id"), r.get("id")) not in suppress["estimate"]]
 estimates = [r for r in estimates_all
              if dedup_key("estimate", r.get("customer_id"), r.get("id")) not in suppress["estimate"]]
 
 # Cap
 memberships_visible = memberships[:SECTION_CAPS["membership"]]
 sleeping_visible = sleeping[:SECTION_CAPS["sleeping"]]
-missed_visible = missed[:SECTION_CAPS["missed"]]
+estimates_recent_visible = estimates_recent[:SECTION_CAPS["estimate"]]
 estimates_visible = estimates[:SECTION_CAPS["estimate"]]
 
 # Today's outcomes
@@ -467,11 +466,11 @@ with db() as _conn:
 
 # Hot leads count (customers who called us back since their last rec)
 hot_count = sum(
-    1 for c in (memberships_visible + sleeping_visible + missed_visible + estimates_visible)
+    1 for c in (memberships_visible + sleeping_visible + estimates_recent_visible + estimates_visible)
     if (outreach_map.get(c.get("customer_id")) or {}).get("called_back_at")
 )
 to_call_count = (len(memberships_visible) + len(sleeping_visible)
-                 + len(missed_visible) + len(estimates_visible))
+                 + len(estimates_recent_visible) + len(estimates_visible))
 
 # ---------- KPI strip ----------
 k1, k2, k3, k4 = st.columns(4)
@@ -492,7 +491,9 @@ st.divider()
 fc1, fc2 = st.columns([2, 3])
 with fc1:
     _filter_options = ["All", "Hot leads only", "Untouched only",
-                       "Missed calls", "Memberships", "Sleeping", "Estimates"]
+                       "Memberships", "Sleeping", "Estimates"]
+    if st.session_state["call_list_filter"] not in _filter_options:
+        st.session_state["call_list_filter"] = "All"   # e.g. stale "Missed calls"
     st.session_state["call_list_filter"] = st.selectbox(
         "Filter",
         _filter_options,
@@ -512,26 +513,17 @@ with fc2:
 # Build opener input dicts + look up phones/emails for everything we'll show
 today_d = date.today()
 all_visible = (list(memberships_visible) + list(sleeping_visible)
-               + list(missed_visible) + list(estimates_visible))
+               + list(estimates_recent_visible) + list(estimates_visible))
 
 # Phone/email enrichment — bulk-parallel so cold-cache loads are fast
 # (~1-2s for 40 customers vs ~12s serially).
 _all_cids = [r.get("customer_id") for r in all_visible if r.get("customer_id")]
 _contact_map = _bulk_lookup_contacts(_all_cids)
 
-for r in memberships_visible + sleeping_visible + estimates_visible:
+for r in all_visible:
     cid = r.get("customer_id")
     if cid:
         r["phone"], r["email"] = _contact_map.get(int(cid), ("", ""))
-for r in missed_visible:
-    cid = r.get("customer_id")
-    if cid:
-        r["phone"], r["email"] = _contact_map.get(int(cid), ("", ""))
-        if not r["phone"]:
-            r["phone"] = r.get("from_phone") or ""
-    else:
-        r["phone"] = r.get("from_phone") or ""
-        r["email"] = ""
 
 # Build opener input list
 opener_inputs: list[dict] = []
@@ -561,21 +553,7 @@ for r in sleeping_visible:
         "loyal_revenue": float(r.get("loyal_revenue") or 0),
         "loyal_invoices": int(r.get("loyal_invoices") or 0),
     })
-for r in missed_visible:
-    received = r.get("received_on")
-    last_visit = r.get("last_visit")
-    opener_inputs.append({
-        "customer_id": r.get("customer_id"),
-        "customer_name": r.get("customer_name") or "Unknown",
-        "kind": "missed",
-        "call_type": r.get("call_type"),
-        "call_when": to_central(received).strftime("%a %I:%M %p") if received else "earlier",
-        "lifetime_revenue": float(r.get("lifetime_revenue") or 0),
-        "lifetime_invoices": int(r.get("lifetime_invoices") or 0),
-        "last_visit_days_ago": (today_d - last_visit).days if last_visit else None,
-        "last_invoice_summary": r.get("last_invoice_summary"),
-    })
-for r in estimates_visible:
+for r in estimates_recent_visible + estimates_visible:
     opener_inputs.append({
         "customer_id": r.get("customer_id"),
         "customer_name": r.get("customer_name"),
@@ -792,10 +770,10 @@ def render_row(r: dict, kind: str, call_id: int | None = None):
 
 # ---------- sections ----------
 
-# Order: missed first (most time-sensitive), then memberships (highest
-# conversion rate + recurring revenue), then aging estimates, then sleeping.
+# Order: recent estimates first (quotes close in the first week or never),
+# then memberships (recurring revenue), then aging estimates, then sleeping.
 section_specs = [
-    ("missed", "📞 Missed calls", "#F34039", missed_visible),
+    ("estimate", "🆕 Recent estimates (first 30 days)", "#10B981", estimates_recent_visible),
     ("membership", "🤝 Membership opportunities", "#0066EE", memberships_visible),
     ("estimate", "📋 Aging estimates (30d+)", "#8B5CF6", estimates_visible),
     ("sleeping", "💤 Sleeping customers", "#F2A93B", sleeping_visible),
@@ -803,11 +781,10 @@ section_specs = [
 
 current_filter = st.session_state["call_list_filter"]
 visible_kinds = {
-    "Missed calls": {"missed"},
     "Memberships": {"membership"},
     "Sleeping": {"sleeping"},
     "Estimates": {"estimate"},
-}.get(current_filter, {"missed", "membership", "sleeping", "estimate"})
+}.get(current_filter, {"membership", "sleeping", "estimate"})
 
 for kind, label, color, rows in section_specs:
     if kind not in visible_kinds:
@@ -833,10 +810,9 @@ for kind, label, color, rows in section_specs:
     if hot_count_in_section:
         header = f"{label} ({count}) · 🔥 {hot_count_in_section} hot"
 
-    with st.expander(header, expanded=(count > 0 and kind == "missed")):
+    with st.expander(header, expanded=(count > 0 and label.startswith("🆕"))):
         if count == 0:
             empty_msg = {
-                "missed": "🎉 No missed calls to chase. Nice work.",
                 "membership": "🎉 Every recent install customer has been handled.",
                 "sleeping": "🎉 No sleeping customers in rotation right now.",
             }.get(kind, "🎉 Nothing here — focus on the other sections.")
