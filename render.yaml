@@ -1,0 +1,24 @@
+# Render blueprint — Telnyx inbound-SMS webhook receiver.
+# Deploy: render.com → New → Blueprint → point at this repo.
+# Free tier: sleeps when idle (~30-60s cold start); Telnyx retries
+# webhook delivery, and the handler de-dupes, so nothing is lost.
+services:
+  - type: web
+    name: pure-comfort-sms-webhook
+    runtime: python
+    plan: free
+    buildCommand: pip install -r webhook/requirements.txt
+    startCommand: uvicorn webhook.telnyx_webhook:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: WEBHOOK_TOKEN
+        sync: false
+      - key: ST_APP_KEY
+        sync: false
+      - key: ST_TENANT_ID
+        sync: false
+      - key: ST_CLIENT_ID
+        sync: false
+      - key: ST_CLIENT_SECRET
+        sync: false

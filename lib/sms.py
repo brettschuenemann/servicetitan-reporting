@@ -144,6 +144,26 @@ class SmsError(RuntimeError):
     pass
 
 
+def sms_provider() -> str:
+    """Which provider sends for us: 'telnyx' or 'twilio'.
+
+    Explicit SMS_PROVIDER env wins; otherwise inferred from which
+    credentials are present (Telnyx preferred if both).
+    """
+    explicit = (os.environ.get("SMS_PROVIDER") or "").strip().lower()
+    if explicit in ("telnyx", "twilio"):
+        return explicit
+    if os.environ.get("TELNYX_API_KEY"):
+        return "telnyx"
+    return "twilio"
+
+
+def provider_configured() -> bool:
+    """True if ANY sending provider has credentials set (for UI banners)."""
+    return bool(os.environ.get("TELNYX_API_KEY")
+                or os.environ.get("TWILIO_ACCOUNT_SID"))
+
+
 def _get_twilio_client():
     """Lazy-import Twilio. Returns a configured Client or raises."""
     try:
@@ -162,13 +182,48 @@ def _get_twilio_client():
 
 
 def _from_number() -> str:
-    n = os.environ.get("TWILIO_FROM_NUMBER")
+    n = (os.environ.get("SMS_FROM_NUMBER")
+         or os.environ.get("TELNYX_FROM_NUMBER")
+         or os.environ.get("TWILIO_FROM_NUMBER"))
     if not n:
-        raise SmsError("TWILIO_FROM_NUMBER not set")
+        raise SmsError("SMS_FROM_NUMBER (or TELNYX_/TWILIO_FROM_NUMBER) not set")
     norm = normalize_phone(n)
     if not norm:
-        raise SmsError(f"TWILIO_FROM_NUMBER not parseable: {n}")
+        raise SmsError(f"from-number not parseable: {n}")
     return norm
+
+
+def _send_via_telnyx(to_norm: str, body: str) -> tuple[str, str]:
+    """POST /v2/messages. Returns (provider_message_id, status). Raises SmsError."""
+    import requests
+    api_key = os.environ.get("TELNYX_API_KEY")
+    if not api_key:
+        raise SmsError("TELNYX_API_KEY not set")
+    payload = {"from": _from_number(), "to": to_norm, "text": body}
+    profile = os.environ.get("TELNYX_MESSAGING_PROFILE_ID")
+    if profile:
+        payload["messaging_profile_id"] = profile
+    resp = requests.post(
+        "https://api.telnyx.com/v2/messages",
+        json=payload,
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=30,
+    )
+    if resp.status_code >= 400:
+        raise SmsError(f"Telnyx send failed ({resp.status_code}): {resp.text[:300]}")
+    data = resp.json().get("data", {})
+    to_list = data.get("to") or [{}]
+    status = (to_list[0] or {}).get("status") or "queued"
+    return str(data.get("id") or ""), str(status)
+
+
+def _dispatch_send(to_norm: str, body: str) -> tuple[str, str]:
+    """Send via the active provider. Returns (provider_message_id, status)."""
+    if sms_provider() == "telnyx":
+        return _send_via_telnyx(to_norm, body)
+    client = _get_twilio_client()
+    msg = client.messages.create(to=to_norm, from_=_from_number(), body=body)
+    return str(msg.sid), str(msg.status or "queued")
 
 
 def dry_run_enabled() -> bool:
@@ -225,14 +280,11 @@ def send_sms(
             raw={"dry_run": True, "body": body},
         )
 
-    # Real send
-    client = _get_twilio_client()
+    # Real send — provider chosen by sms_provider(). The provider's
+    # message id is stored in the twilio_sid column regardless of vendor
+    # (legacy column name; it's just "provider message id").
     try:
-        msg = client.messages.create(
-            to=to_norm,
-            from_=_from_number(),
-            body=body,
-        )
+        sid, status = _dispatch_send(to_norm, body)
     except Exception as exc:
         return _persist(
             conn, direction="outbound", channel=channel,
@@ -249,10 +301,10 @@ def send_sms(
         from_phone=from_n, to_phone=to_norm, body=body,
         customer_id=customer_id, related_call_id=related_call_id,
         campaign_id=campaign_id,
-        twilio_sid=msg.sid, status=str(msg.status or "queued"),
+        twilio_sid=sid, status=status,
         error_code=None, error_message=None,
         sent_by=sent_by, posted_to_st=False,
-        raw={"sid": msg.sid, "status": str(msg.status)},
+        raw={"sid": sid, "status": status, "provider": sms_provider()},
     )
 
     if post_to_st and customer_id and st_client is not None:

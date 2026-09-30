@@ -21,7 +21,7 @@ load_dotenv()
 
 from lib.database import db
 from lib.servicetitan import ServiceTitanClient
-from lib.sms import send_sms, normalize_phone, dry_run_enabled, match_customer_by_phone
+from lib.sms import send_sms, normalize_phone, dry_run_enabled, match_customer_by_phone, provider_configured
 from lib.sms_ai import suggest_reply, INTENT_META
 from lib.style import apply_mobile_styles
 
@@ -227,9 +227,9 @@ st.title("💬 Texts")
 if dry_run_enabled():
     st.warning("**DRY-RUN MODE** — `SMS_DRY_RUN=1`. Messages are logged but NOT sent. "
                "Unset the env var to send for real.")
-elif not os.environ.get("TWILIO_ACCOUNT_SID"):
-    st.info("Twilio credentials not yet configured — page is read-only until "
-            "`TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_NUMBER` are set in env.")
+elif not provider_configured():
+    st.info("No SMS provider configured — page is read-only until Telnyx "
+            "(`TELNYX_API_KEY` + `SMS_FROM_NUMBER`) or Twilio credentials are set.")
 
 # ── Campaigns strip ──────────────────────────────────────────────
 campaigns = load_active_campaigns()

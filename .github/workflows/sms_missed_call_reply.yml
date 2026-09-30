@@ -34,6 +34,10 @@ jobs:
           ST_TENANT_ID: ${{ secrets.ST_TENANT_ID }}
           ST_CLIENT_ID: ${{ secrets.ST_CLIENT_ID }}
           ST_CLIENT_SECRET: ${{ secrets.ST_CLIENT_SECRET }}
+          TELNYX_API_KEY: ${{ secrets.TELNYX_API_KEY }}
+          TELNYX_MESSAGING_PROFILE_ID: ${{ secrets.TELNYX_MESSAGING_PROFILE_ID }}
+          SMS_FROM_NUMBER: ${{ secrets.SMS_FROM_NUMBER }}
+          SMS_PROVIDER: ${{ secrets.SMS_PROVIDER }}
           TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
           TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
           TWILIO_FROM_NUMBER: ${{ secrets.TWILIO_FROM_NUMBER }}

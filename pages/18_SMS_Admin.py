@@ -24,6 +24,7 @@ from lib.database import db
 from lib.servicetitan import ServiceTitanClient
 from lib.sms import (
     send_sms, normalize_phone, dry_run_enabled, record_opt_out,
+    provider_configured,
 )
 from lib.sms_ai import personalize_message, render_customer_facts
 from lib.style import apply_mobile_styles, page_header
@@ -52,8 +53,8 @@ page_header(
 if dry_run_enabled():
     st.warning("**DRY-RUN MODE** — `SMS_DRY_RUN=1`. Any 'send' button below "
                "will log but NOT actually send.")
-elif not os.environ.get("TWILIO_ACCOUNT_SID"):
-    st.info("Twilio not configured — sends will be logged with status='failed'. "
+elif not provider_configured():
+    st.info("No SMS provider configured — sends will be logged with status='failed'. "
             "Preview functionality still works.")
 
 

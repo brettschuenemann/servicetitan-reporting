@@ -56,6 +56,14 @@ def main() -> int:
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
+    # Telnyx delivers inbound via webhooks only (webhook/telnyx_webhook.py
+    # on Render) — polling is a Twilio-only mechanism.
+    from lib.sms import sms_provider
+    if sms_provider() == "telnyx":
+        print("[sms_poll_inbound] provider=telnyx — inbound arrives via "
+              "webhook receiver, nothing to poll")
+        return 0
+
     # Quick env check — bail early if Twilio not configured (cron-safe)
     if not (os.environ.get("TWILIO_ACCOUNT_SID")
             and os.environ.get("TWILIO_AUTH_TOKEN")):
