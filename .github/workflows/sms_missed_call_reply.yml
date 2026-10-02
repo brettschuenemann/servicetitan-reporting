@@ -9,7 +9,6 @@ name: SMS — missed-call auto-reply
 # to 0) once you trust the behavior.
 
 on:
-  schedule: []
     # PAUSED 2026-10-02 (Brett) — re-enable by uncommenting:
     # - cron: '*/5 13-23 * * 1-5'
   workflow_dispatch:

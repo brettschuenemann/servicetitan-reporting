@@ -4,7 +4,6 @@ name: SMS — aging estimate follow-up
 # warmer SMS check-ins. Skips opted-out + already-booked customers.
 
 on:
-  schedule: []
     # PAUSED 2026-10-02 (Brett) — re-enable by uncommenting:
     # - cron: '0 15 * * 1-5'
   workflow_dispatch:
