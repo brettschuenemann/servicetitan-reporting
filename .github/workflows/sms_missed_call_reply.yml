@@ -9,10 +9,9 @@ name: SMS — missed-call auto-reply
 # to 0) once you trust the behavior.
 
 on:
-  schedule:
-    # Every 5 min, 13:00–23:55 UTC weekdays = 8 AM – 6 PM CDT
-    # (after-hours messages also reasonable, but limit blast radius initially)
-    - cron: '*/5 13-23 * * 1-5'
+  schedule: []
+    # PAUSED 2026-10-02 (Brett) — re-enable by uncommenting:
+    # - cron: '*/5 13-23 * * 1-5'
   workflow_dispatch:
 
 jobs:
