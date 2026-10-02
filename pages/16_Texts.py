@@ -89,7 +89,7 @@ def _bubble(direction: str, body: str, when: str, channel: str = "") -> str:
 
 # ── data loading ──────────────────────────────────────────────────
 
-@st.cache_data(ttl=30, show_spinner="Loading messages…")
+@st.cache_data(ttl=10, show_spinner=False)
 def load_threads(limit: int = 50) -> list[dict]:
     """Group messages by customer; return most recent N threads."""
     with db() as conn:
@@ -245,155 +245,163 @@ if campaigns:
             )
 
 # ── Unmatched bucket ──────────────────────────────────────────────
-unmatched = load_unmatched()
-if unmatched:
-    st.subheader(f"❓ Unmatched messages ({len(unmatched)})")
-    st.caption("Customer texted us but we couldn't link them to an ST record. "
-               "Enter their customer_id to link.")
-    for u in unmatched:
-        with st.container(border=True):
-            cols = st.columns([3, 2, 2])
-            cols[0].markdown(
-                f"**📞 {escape(u['from_phone'])}** · {_format_when(u['created_at'])}<br>"
-                f"<span style='color:#444'>{escape((u['body'] or '')[:200])}</span>",
-                unsafe_allow_html=True,
-            )
-            cid_input = cols[1].text_input(
-                "ST customer_id",
-                key=f"link_cid_{u['id']}",
-                placeholder="e.g. 151125572",
-                label_visibility="collapsed",
-            )
-            if cols[2].button("🔗 Link", key=f"link_btn_{u['id']}", use_container_width=True):
-                try:
-                    cid = int(cid_input.strip())
-                    with db() as conn:
-                        with conn.cursor() as cur:
-                            cur.execute(
-                                "UPDATE sms_messages SET customer_id = %s WHERE id = %s",
-                                (cid, u["message_id"]),
-                            )
-                            cur.execute(
-                                """UPDATE sms_unmatched
-                                   SET resolved_at = NOW(), linked_customer_id = %s
-                                   WHERE id = %s""",
-                                (cid, u["id"]),
-                            )
-                        conn.commit()
-                    st.success(f"Linked to customer {cid}")
-                    load_threads.clear()
-                    st.rerun()
-                except ValueError:
-                    st.error("Customer ID must be a number")
-                except Exception as exc:
-                    st.error(f"Link failed: {exc}")
-
-# ── Threads ───────────────────────────────────────────────────────
-threads = load_threads()
-needs_reply = [t for t in threads if t["needs_reply"]]
-others = [t for t in threads if not t["needs_reply"]]
-
-def render_thread(t: dict) -> None:
-    key_phone = t.get("from_phone") if t["direction"] == "inbound" else t.get("to_phone")
-    title_name = t.get("customer_name") or f"📞 {t.get('from_phone') or t.get('to_phone')}"
-    summary = (t["body"] or "")[:80].replace("\n", " ")
-    label = f"{'📩 ' if t['needs_reply'] else '💬 '}{title_name} — {summary}"
-
-    with st.expander(label, expanded=t["needs_reply"]):
-        st.caption(f"Latest: {t['direction']} · {_format_when(t['sent_at'])} · "
-                   f"{t['thread_size']} messages")
-
-        # Render full conversation
-        msgs = load_thread_messages(t.get("customer_id"), key_phone)
-        thread_html = "".join(
-            _bubble(m["direction"], m["body"] or "",
-                    _format_when(m["sent_at"]), m.get("channel") or "")
-            for m in msgs
-        )
-        st.markdown(f"<div>{thread_html}</div>", unsafe_allow_html=True)
-
-        # AI suggested reply — only when latest is inbound (needs reply)
-        # and Anthropic key is available
-        prefill_key = f"prefill_{t.get('customer_id') or key_phone}"
-        if t["needs_reply"] and os.environ.get("ANTHROPIC_API_KEY"):
-            suggestion = _cached_suggestion(
-                tuple((m["direction"], m["body"] or "") for m in msgs)
-            )
-            intent = suggestion.get("intent", "unclear")
-            reply_text_ai = suggestion.get("suggested_reply", "")
-            if reply_text_ai:
-                emoji, color, label = INTENT_META.get(
-                    intent, INTENT_META["unclear"]
-                )
-                st.markdown(
-                    f"<div style='background:#F9FAFB;border-left:3px solid {color};"
-                    f"padding:8px 12px;margin:8px 0;border-radius:4px'>"
-                    f"<div style='font-size:11px;font-weight:700;color:{color};"
-                    f"text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px'>"
-                    f"🤖 Suggested reply · {emoji} {escape(label)}</div>"
-                    f"<div style='font-size:14px;color:#111827;line-height:1.45'>"
-                    f"{escape(reply_text_ai)}</div></div>",
+# The inbox polls itself: this fragment reruns every 15s so inbound
+# texts appear while Fey is just looking at the page. Draft replies
+# survive reruns via their session_state keys.
+@st.fragment(run_every="15s")
+def live_inbox() -> None:
+    unmatched = load_unmatched()
+    if unmatched:
+        st.subheader(f"❓ Unmatched messages ({len(unmatched)})")
+        st.caption("Customer texted us but we couldn't link them to an ST record. "
+                   "Enter their customer_id to link.")
+        for u in unmatched:
+            with st.container(border=True):
+                cols = st.columns([3, 2, 2])
+                cols[0].markdown(
+                    f"**📞 {escape(u['from_phone'])}** · {_format_when(u['created_at'])}<br>"
+                    f"<span style='color:#444'>{escape((u['body'] or '')[:200])}</span>",
                     unsafe_allow_html=True,
                 )
-                if st.button("✨ Use this suggestion",
-                             key=f"use_sugg_{prefill_key}",
-                             use_container_width=False):
-                    # Write directly into the textarea's own session-state
-                    # slot — Streamlit ignores a text_area's `value` param
-                    # once its key exists, so a separate prefill key never
-                    # reached the widget (Send stayed disabled).
-                    st.session_state[f"reply_{t.get('customer_id') or key_phone}"] = reply_text_ai
-                    st.rerun()
-            elif intent == "unclear":
-                st.caption("🤔 AI couldn't draft a clean reply — your turn.")
+                cid_input = cols[1].text_input(
+                    "ST customer_id",
+                    key=f"link_cid_{u['id']}",
+                    placeholder="e.g. 151125572",
+                    label_visibility="collapsed",
+                )
+                if cols[2].button("🔗 Link", key=f"link_btn_{u['id']}", use_container_width=True):
+                    try:
+                        cid = int(cid_input.strip())
+                        with db() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute(
+                                    "UPDATE sms_messages SET customer_id = %s WHERE id = %s",
+                                    (cid, u["message_id"]),
+                                )
+                                cur.execute(
+                                    """UPDATE sms_unmatched
+                                       SET resolved_at = NOW(), linked_customer_id = %s
+                                       WHERE id = %s""",
+                                    (cid, u["id"]),
+                                )
+                            conn.commit()
+                        st.success(f"Linked to customer {cid}")
+                        load_threads.clear()
+                        st.rerun()
+                    except ValueError:
+                        st.error("Customer ID must be a number")
+                    except Exception as exc:
+                        st.error(f"Link failed: {exc}")
 
-        # Reply input
-        reply_key = f"reply_{t.get('customer_id') or key_phone}"
-        reply_text = st.text_area(
-            "Reply",
-            key=reply_key,
-            placeholder="Type your reply…",
-            height=80,
-            label_visibility="collapsed",
-        )
-        send_col, info_col = st.columns([1, 3])
-        if send_col.button("📤 Send", key=f"send_{reply_key}",
-                            disabled=not reply_text.strip(),
-                            use_container_width=True):
-            try:
-                with db() as conn:
-                    row = send_sms(
-                        conn,
-                        to_phone=key_phone,
-                        body=reply_text.strip(),
-                        channel="manual",
-                        customer_id=t.get("customer_id"),
-                        sent_by="fey",
-                        post_to_st=bool(t.get("customer_id")),
-                        st_client=_st_client(),
+    # ── Threads ───────────────────────────────────────────────────────
+    threads = load_threads()
+    needs_reply = [t for t in threads if t["needs_reply"]]
+    others = [t for t in threads if not t["needs_reply"]]
+
+    def render_thread(t: dict) -> None:
+        key_phone = t.get("from_phone") if t["direction"] == "inbound" else t.get("to_phone")
+        title_name = t.get("customer_name") or f"📞 {t.get('from_phone') or t.get('to_phone')}"
+        summary = (t["body"] or "")[:80].replace("\n", " ")
+        label = f"{'📩 ' if t['needs_reply'] else '💬 '}{title_name} — {summary}"
+
+        with st.expander(label, expanded=t["needs_reply"]):
+            st.caption(f"Latest: {t['direction']} · {_format_when(t['sent_at'])} · "
+                       f"{t['thread_size']} messages")
+
+            # Render full conversation
+            msgs = load_thread_messages(t.get("customer_id"), key_phone)
+            thread_html = "".join(
+                _bubble(m["direction"], m["body"] or "",
+                        _format_when(m["sent_at"]), m.get("channel") or "")
+                for m in msgs
+            )
+            st.markdown(f"<div>{thread_html}</div>", unsafe_allow_html=True)
+
+            # AI suggested reply — only when latest is inbound (needs reply)
+            # and Anthropic key is available
+            prefill_key = f"prefill_{t.get('customer_id') or key_phone}"
+            if t["needs_reply"] and os.environ.get("ANTHROPIC_API_KEY"):
+                suggestion = _cached_suggestion(
+                    tuple((m["direction"], m["body"] or "") for m in msgs)
+                )
+                intent = suggestion.get("intent", "unclear")
+                reply_text_ai = suggestion.get("suggested_reply", "")
+                if reply_text_ai:
+                    emoji, color, label = INTENT_META.get(
+                        intent, INTENT_META["unclear"]
                     )
-                if row.get("status") == "opted_out":
-                    st.error("Recipient opted out — message NOT sent.")
-                elif row.get("status") == "dry_run":
-                    st.info("Dry-run — message logged but not actually sent.")
-                else:
-                    st.success(f"Sent. Status: {row.get('status')}")
-                load_threads.clear()
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Send failed: {exc}")
+                    st.markdown(
+                        f"<div style='background:#F9FAFB;border-left:3px solid {color};"
+                        f"padding:8px 12px;margin:8px 0;border-radius:4px'>"
+                        f"<div style='font-size:11px;font-weight:700;color:{color};"
+                        f"text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px'>"
+                        f"🤖 Suggested reply · {emoji} {escape(label)}</div>"
+                        f"<div style='font-size:14px;color:#111827;line-height:1.45'>"
+                        f"{escape(reply_text_ai)}</div></div>",
+                        unsafe_allow_html=True,
+                    )
+                    if st.button("✨ Use this suggestion",
+                                 key=f"use_sugg_{prefill_key}",
+                                 use_container_width=False):
+                        # Write directly into the textarea's own session-state
+                        # slot — Streamlit ignores a text_area's `value` param
+                        # once its key exists, so a separate prefill key never
+                        # reached the widget (Send stayed disabled).
+                        st.session_state[f"reply_{t.get('customer_id') or key_phone}"] = reply_text_ai
+                        st.rerun()
+                elif intent == "unclear":
+                    st.caption("🤔 AI couldn't draft a clean reply — your turn.")
+
+            # Reply input
+            reply_key = f"reply_{t.get('customer_id') or key_phone}"
+            reply_text = st.text_area(
+                "Reply",
+                key=reply_key,
+                placeholder="Type your reply…",
+                height=80,
+                label_visibility="collapsed",
+            )
+            send_col, info_col = st.columns([1, 3])
+            if send_col.button("📤 Send", key=f"send_{reply_key}",
+                                disabled=not reply_text.strip(),
+                                use_container_width=True):
+                try:
+                    with db() as conn:
+                        row = send_sms(
+                            conn,
+                            to_phone=key_phone,
+                            body=reply_text.strip(),
+                            channel="manual",
+                            customer_id=t.get("customer_id"),
+                            sent_by="fey",
+                            post_to_st=bool(t.get("customer_id")),
+                            st_client=_st_client(),
+                        )
+                    if row.get("status") == "opted_out":
+                        st.error("Recipient opted out — message NOT sent.")
+                    elif row.get("status") == "dry_run":
+                        st.info("Dry-run — message logged but not actually sent.")
+                    else:
+                        st.success(f"Sent. Status: {row.get('status')}")
+                    load_threads.clear()
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Send failed: {exc}")
 
 
-if needs_reply:
-    st.subheader(f"📩 New replies ({len(needs_reply)})")
-    for t in needs_reply:
-        render_thread(t)
+    if needs_reply:
+        st.subheader(f"📩 New replies ({len(needs_reply)})")
+        for t in needs_reply:
+            render_thread(t)
 
-if others:
-    st.subheader(f"💬 Other recent threads ({len(others)})")
-    for t in others:
-        render_thread(t)
+    if others:
+        st.subheader(f"💬 Other recent threads ({len(others)})")
+        for t in others:
+            render_thread(t)
 
-if not threads and not unmatched:
-    st.info("No messages yet. Once Twilio is wired up and the cron starts running, "
-            "inbound and outbound SMS will appear here.")
+    if not threads and not unmatched:
+        st.info("No messages yet. Once Twilio is wired up and the cron starts running, "
+                "inbound and outbound SMS will appear here.")
+
+
+live_inbox()
