@@ -89,7 +89,11 @@ def _bubble(direction: str, body: str, when: str, channel: str = "") -> str:
 
 # ── data loading ──────────────────────────────────────────────────
 
-@st.cache_data(ttl=10, show_spinner=False)
+# Loaders cache aggressively; invalidation is explicit. live_inbox()
+# polls a one-row cursor each tick and clears these only when a message
+# arrived, was sent, or an unmatched row was linked — so ticks and
+# reruns cost one cheap query, not a full reload.
+@st.cache_data(ttl=300, show_spinner=False)
 def load_threads(limit: int = 50) -> list[dict]:
     """Group messages by customer; return most recent N threads."""
     with db() as conn:
@@ -148,6 +152,7 @@ def load_threads(limit: int = 50) -> list[dict]:
             return [dict(r) for r in cur.fetchall()]
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def load_thread_messages(customer_id: int | None, phone: str | None) -> list[dict]:
     """Pull the full message log for one thread."""
     with db() as conn:
@@ -176,6 +181,7 @@ def load_thread_messages(customer_id: int | None, phone: str | None) -> list[dic
             return [dict(r) for r in cur.fetchall()]
 
 
+@st.cache_data(ttl=300, show_spinner=False)
 def load_unmatched(limit: int = 20) -> list[dict]:
     with db() as conn:
         with conn.cursor() as cur:
@@ -194,6 +200,20 @@ def load_unmatched(limit: int = 20) -> list[dict]:
             return [dict(r) for r in cur.fetchall()]
 
 
+def _inbox_cursor() -> tuple:
+    """Newest message id + open unmatched count, one cheap round trip.
+    Any send, inbound, or link moves it — the inbox only pays for a
+    full reload when this changes."""
+    with db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT (SELECT COALESCE(MAX(id), 0) FROM sms_messages) AS m, "
+                "(SELECT COUNT(*) FROM sms_unmatched WHERE resolved_at IS NULL) AS u"
+            )
+            row = cur.fetchone()
+    return (row["m"], row["u"])
+
+
 @st.cache_data(ttl=300, show_spinner=False)
 def _cached_suggestion(thread_signature: tuple) -> dict:
     """Cache AI suggestions by thread signature so we don't re-call Claude
@@ -203,6 +223,7 @@ def _cached_suggestion(thread_signature: tuple) -> dict:
     return suggest_reply(msgs)
 
 
+@st.cache_data(ttl=120, show_spinner=False)
 def load_active_campaigns() -> list[dict]:
     with db() as conn:
         with conn.cursor() as cur:
@@ -245,84 +266,102 @@ if campaigns:
             )
 
 # ── ✏️ Compose — send a text to any number ────────────────────────
-# Outside the live fragment so the 15s inbox poll never disturbs a
-# half-typed message. All sends route through send_sms: opt-out check,
-# dry-run flag, ST-note push, and thread logging all apply.
-with st.expander("✏️ New text message", expanded=False):
-    # Result of the previous run's send: st.rerun() wipes in-run
-    # messages, so the handler stashes the outcome and we show it here.
-    _flash = st.session_state.pop("compose_flash", None)
-    if _flash:
-        _fn = {"success": st.success, "info": st.info, "error": st.error}
-        _fn.get(_flash[0], st.info)(_flash[1])
-    # Widget keys can't be written after the widget instantiates, so the
-    # send handler sets a flag and the clear happens here, next run.
-    if st.session_state.pop("compose_clear", False):
-        st.session_state["compose_body"] = ""
+# Its own fragment: typing in here reruns just this block, never the
+# campaigns strip or the inbox. All sends route through send_sms:
+# opt-out check, dry-run flag, ST-note push, and thread logging apply.
 
-    comp_phone = st.text_input(
-        "To (any format)", key="compose_phone",
-        placeholder="(847) 555-1234",
-    )
-    comp_norm = normalize_phone(comp_phone) if comp_phone.strip() else None
-    comp_cid = None
-    if comp_phone.strip() and not comp_norm:
-        st.error("Needs a valid 10-digit US number.")
-    elif comp_norm:
-        with db() as _c_conn:
-            comp_cid = match_customer_by_phone(_c_conn, comp_norm)
+@st.cache_data(ttl=600, show_spinner=False)
+def _compose_match(norm: str) -> tuple:
+    """Phone → (customer_id, display name). Cached so the preview costs
+    one lookup per number, not one per keystroke-commit."""
+    with db() as conn:
+        cid = match_customer_by_phone(conn, norm)
+        name = None
+        if cid:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT MIN(customer_name) AS n FROM invoices WHERE customer_id = %s",
+                    (cid,),
+                )
+                row = cur.fetchone()
+            name = (row or {}).get("n")
+    return cid, name
+
+
+@st.fragment
+def compose_box() -> None:
+    with st.expander("✏️ New text message", expanded=False):
+        # Result of the previous run's send: st.rerun() wipes in-run
+        # messages, so the handler stashes the outcome and we show it here.
+        _flash = st.session_state.pop("compose_flash", None)
+        if _flash:
+            _fn = {"success": st.success, "info": st.info, "error": st.error}
+            _fn.get(_flash[0], st.info)(_flash[1])
+        # Widget keys can't be written after the widget instantiates, so the
+        # send handler sets a flag and the clear happens here, next run.
+        if st.session_state.pop("compose_clear", False):
+            st.session_state["compose_body"] = ""
+
+        comp_phone = st.text_input(
+            "To (any format)", key="compose_phone",
+            placeholder="(847) 555-1234",
+        )
+        comp_norm = normalize_phone(comp_phone) if comp_phone.strip() else None
+        comp_cid = None
+        if comp_phone.strip() and not comp_norm:
+            st.error("Needs a valid 10-digit US number.")
+        elif comp_norm:
+            comp_cid, _name = _compose_match(comp_norm)
             if comp_cid:
-                with _c_conn.cursor() as _c_cur:
-                    _c_cur.execute(
-                        "SELECT MIN(customer_name) AS n FROM invoices WHERE customer_id = %s",
-                        (comp_cid,),
-                    )
-                    _row = _c_cur.fetchone()
-                _name = (_row or {}).get("n") or f"customer {comp_cid}"
-                st.caption(f"✓ {comp_norm} — matches **{_name}** "
+                st.caption(f"✓ {comp_norm} — matches **{_name or f'customer {comp_cid}'}** "
                            f"(thread + ST note will attach to their record)")
             else:
                 st.caption(f"{comp_norm} — no customer match; lands in the "
                            "unmatched bucket until linked")
 
-    comp_body = st.text_area(
-        "Message", key="compose_body", height=90,
-        placeholder="Type the message…",
-    )
-    _chars = len(comp_body or "")
-    st.caption(f"{_chars} chars · {max(1, -(-_chars // 153)) if _chars else 1} SMS segment(s)")
+        comp_body = st.text_area(
+            "Message", key="compose_body", height=90,
+            placeholder="Type the message…",
+        )
+        _chars = len(comp_body or "")
+        _segs = 1 if _chars <= 160 else -(-_chars // 153)
+        st.caption(f"{_chars} chars · {_segs} SMS segment(s)")
 
-    if st.button("📤 Send text", key="compose_send", type="primary",
-                 disabled=not (comp_norm and (comp_body or "").strip())):
-        try:
-            with db() as _s_conn:
-                _res = send_sms(
-                    _s_conn,
-                    to_phone=comp_norm,
-                    body=comp_body.strip(),
-                    channel="manual",
-                    customer_id=comp_cid,
-                    sent_by="fey",
-                    post_to_st=bool(comp_cid),
-                    st_client=_st_client(),
-                )
-            _status = _res.get("status")
-            if _status == "opted_out":
-                _flash_out = ("error", "That number is on the opt-out list — NOT sent.")
-            elif _status == "dry_run":
-                _flash_out = ("info", f"Dry-run mode — logged to the thread for {comp_norm} "
-                                      "but not actually sent.")
-            elif _status == "failed":
-                _flash_out = ("error", "Send failed: "
-                              f"{_res.get('error_message') or _res.get('error_code')}")
-            else:
-                _flash_out = ("success", f"Sent to {comp_norm} ({_status}).")
-            st.session_state["compose_flash"] = _flash_out
-            st.session_state["compose_clear"] = _status not in ("opted_out", "failed")
-            load_threads.clear()
-            st.rerun()
-        except Exception as _exc:
-            st.error(f"Send failed: {_exc}")
+        if st.button("📤 Send text", key="compose_send", type="primary",
+                     disabled=not (comp_norm and (comp_body or "").strip())):
+            try:
+                with db() as _s_conn:
+                    _res = send_sms(
+                        _s_conn,
+                        to_phone=comp_norm,
+                        body=comp_body.strip(),
+                        channel="manual",
+                        customer_id=comp_cid,
+                        sent_by="fey",
+                        post_to_st=bool(comp_cid),
+                        st_client=_st_client(),
+                    )
+                _status = _res.get("status")
+                if _status == "opted_out":
+                    _flash_out = ("error", "That number is on the opt-out list — NOT sent.")
+                elif _status == "dry_run":
+                    _flash_out = ("info", f"Dry-run mode — logged to the thread for {comp_norm} "
+                                          "but not actually sent.")
+                elif _status == "failed":
+                    _flash_out = ("error", "Send failed: "
+                                  f"{_res.get('error_message') or _res.get('error_code')}")
+                else:
+                    _flash_out = ("success", f"Sent to {comp_norm} ({_status}).")
+                st.session_state["compose_flash"] = _flash_out
+                st.session_state["compose_clear"] = _status not in ("opted_out", "failed")
+                # Full-app rerun so the inbox picks the new message up
+                # immediately (its cursor check does the cache clearing).
+                st.rerun(scope="app")
+            except Exception as _exc:
+                st.error(f"Send failed: {_exc}")
+
+
+compose_box()
 
 
 # The inbox polls itself: this fragment reruns every 15s so inbound
@@ -330,6 +369,23 @@ with st.expander("✏️ New text message", expanded=False):
 # survive reruns via their session_state keys.
 @st.fragment(run_every="15s")
 def live_inbox() -> None:
+    # One cheap query per tick/interaction; the heavy loaders only
+    # refetch when something actually changed.
+    cursor = _inbox_cursor()
+    if st.session_state.get("inbox_cursor") != cursor:
+        st.session_state["inbox_cursor"] = cursor
+        load_threads.clear()
+        load_thread_messages.clear()
+        load_unmatched.clear()
+
+    # Outcome of the previous run's send/link — st.rerun() wipes in-run
+    # messages, so handlers stash the result here and it shows on top,
+    # where it stays visible even if the thread moved or collapsed.
+    _flash = st.session_state.pop("inbox_flash", None)
+    if _flash:
+        _fn = {"success": st.success, "info": st.info, "error": st.error}
+        _fn.get(_flash[0], st.info)(_flash[1])
+
     unmatched = load_unmatched()
     if unmatched:
         st.subheader(f"❓ Unmatched messages ({len(unmatched)})")
@@ -365,8 +421,8 @@ def live_inbox() -> None:
                                     (cid, u["id"]),
                                 )
                             conn.commit()
-                        st.success(f"Linked to customer {cid}")
-                        load_threads.clear()
+                        st.session_state["inbox_flash"] = (
+                            "success", f"Linked to customer {cid}")
                         st.rerun()
                     except ValueError:
                         st.error("Customer ID must be a number")
@@ -434,6 +490,10 @@ def live_inbox() -> None:
 
             # Reply input
             reply_key = f"reply_{t.get('customer_id') or key_phone}"
+            # Draft-clear flag from a successful send last run (widget
+            # keys can't be written after the widget instantiates).
+            if st.session_state.pop(f"clear_{reply_key}", False):
+                st.session_state[reply_key] = ""
             reply_text = st.text_area(
                 "Reply",
                 key=reply_key,
@@ -457,13 +517,20 @@ def live_inbox() -> None:
                             post_to_st=bool(t.get("customer_id")),
                             st_client=_st_client(),
                         )
-                    if row.get("status") == "opted_out":
-                        st.error("Recipient opted out — message NOT sent.")
-                    elif row.get("status") == "dry_run":
-                        st.info("Dry-run — message logged but not actually sent.")
+                    _status = row.get("status")
+                    if _status == "opted_out":
+                        _out = ("error", "Recipient opted out — message NOT sent.")
+                    elif _status == "dry_run":
+                        _out = ("info", f"Dry-run — reply to {title_name} logged "
+                                        "but not actually sent.")
+                    elif _status == "failed":
+                        _out = ("error", "Send failed: "
+                                f"{row.get('error_message') or row.get('error_code')}")
                     else:
-                        st.success(f"Sent. Status: {row.get('status')}")
-                    load_threads.clear()
+                        _out = ("success", f"Reply sent to {title_name} ({_status}).")
+                    st.session_state["inbox_flash"] = _out
+                    st.session_state[f"clear_{reply_key}"] = (
+                        _status not in ("opted_out", "failed"))
                     st.rerun()
                 except Exception as exc:
                     st.error(f"Send failed: {exc}")

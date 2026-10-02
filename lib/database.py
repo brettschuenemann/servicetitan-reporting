@@ -9,6 +9,7 @@ Neon (neon.tech) — serverless Postgres, free tier is plenty for this workload.
 from __future__ import annotations
 
 import os
+import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Iterator, Optional
@@ -547,14 +548,84 @@ def get_connection() -> psycopg2.extensions.connection:
     return conn
 
 
+# A fresh TLS connection to Neon costs ~400ms — roughly 8x any query this
+# app actually runs — so db() keeps a small idle pool and hands
+# connections back out instead of dialing per call. get_connection()
+# stays un-pooled on purpose: the webhook and cron scripts own those
+# connections' lifecycle (`with get_connection() as conn:` commits
+# without closing), and pooling them would leak checkouts.
+# (psycopg2's ThreadedConnectionPool is deliberately not used: it only
+# retains minconn idle connections, and minconn connects eagerly.)
+_POOL_IDLE: list = []
+_POOL_LOCK = threading.Lock()
+_POOL_MAX_IDLE = int(os.environ.get("DB_POOL_MAX_IDLE", "4"))
+
+
+def _pool_get() -> Optional[psycopg2.extensions.connection]:
+    with _POOL_LOCK:
+        return _POOL_IDLE.pop() if _POOL_IDLE else None
+
+
+def _pool_put(conn: psycopg2.extensions.connection) -> None:
+    """Return a connection to the idle pool in a clean state.
+
+    Same contract as the old close-per-call db(): anything the caller
+    didn't commit is rolled back. Broken or surplus connections close.
+    """
+    try:
+        if conn.closed:
+            return
+        status = conn.info.transaction_status
+        if status == psycopg2.extensions.TRANSACTION_STATUS_UNKNOWN:
+            conn.close()
+            return
+        if status != psycopg2.extensions.TRANSACTION_STATUS_IDLE:
+            conn.rollback()
+        with _POOL_LOCK:
+            if len(_POOL_IDLE) < _POOL_MAX_IDLE:
+                _POOL_IDLE.append(conn)
+                return
+        conn.close()
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
 @contextmanager
 def db() -> Iterator[psycopg2.extensions.connection]:
-    """Context manager that opens, yields, and closes a connection."""
-    conn = get_connection()
+    """Yield a pooled connection, checked out exclusively for this block.
+
+    Neon kills idle connections, so each reused checkout is pinged
+    first; dead ones are discarded and a fresh connect (which also
+    handles the once-per-process schema apply) takes their place.
+    """
+    conn = None
+    while True:
+        candidate = _pool_get()
+        if candidate is None:
+            break
+        try:
+            # Ping outside a transaction (autocommit toggling is
+            # client-side only) so healthy checkouts start idle.
+            candidate.autocommit = True
+            with candidate.cursor() as cur:
+                cur.execute("SELECT 1")
+            candidate.autocommit = False
+            conn = candidate
+            break
+        except Exception:
+            try:
+                candidate.close()
+            except Exception:
+                pass
+    if conn is None:
+        conn = get_connection()
     try:
         yield conn
     finally:
-        conn.close()
+        _pool_put(conn)
 
 
 def get_sync_state(conn, entity: str) -> Optional[dict]:
