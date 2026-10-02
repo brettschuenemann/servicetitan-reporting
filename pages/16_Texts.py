@@ -338,7 +338,11 @@ def render_thread(t: dict) -> None:
                 if st.button("✨ Use this suggestion",
                              key=f"use_sugg_{prefill_key}",
                              use_container_width=False):
-                    st.session_state[prefill_key] = reply_text_ai
+                    # Write directly into the textarea's own session-state
+                    # slot — Streamlit ignores a text_area's `value` param
+                    # once its key exists, so a separate prefill key never
+                    # reached the widget (Send stayed disabled).
+                    st.session_state[f"reply_{t.get('customer_id') or key_phone}"] = reply_text_ai
                     st.rerun()
             elif intent == "unclear":
                 st.caption("🤔 AI couldn't draft a clean reply — your turn.")
@@ -348,7 +352,6 @@ def render_thread(t: dict) -> None:
         reply_text = st.text_area(
             "Reply",
             key=reply_key,
-            value=st.session_state.pop(prefill_key, ""),
             placeholder="Type your reply…",
             height=80,
             label_visibility="collapsed",
