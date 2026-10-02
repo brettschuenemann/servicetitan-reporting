@@ -15,7 +15,13 @@ from typing import Iterator, Optional
 
 import psycopg2
 import psycopg2.extras
-import streamlit as st
+# Streamlit is only needed to read st.secrets when running inside the
+# Streamlit app. Headless consumers (the Telnyx webhook on Render, cron
+# scripts) use plain env vars, so the import is optional.
+try:
+    import streamlit as st
+except ImportError:  # headless host — no Streamlit installed
+    st = None
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS invoices (
@@ -486,12 +492,14 @@ CREATE TABLE IF NOT EXISTS sms_campaigns (
 
 
 def _database_url() -> str:
-    try:
-        url = st.secrets.get("DATABASE_URL")
-        if url:
-            return str(url)
-    except (FileNotFoundError, st.errors.StreamlitSecretNotFoundError):
-        pass
+    if st is not None:
+        try:
+            url = st.secrets.get("DATABASE_URL")
+            if url:
+                return str(url)
+        except Exception:
+            # No secrets file / secret missing — fall through to env.
+            pass
     url = os.environ.get("DATABASE_URL")
     if not url:
         raise RuntimeError(
