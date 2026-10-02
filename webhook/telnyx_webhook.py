@@ -13,9 +13,11 @@ so this tiny FastAPI app is the receiving side of the SMS stack. It:
      ServiceTitan customer-note push
 
 Deploy: Render free web service (render.yaml at repo root), env vars:
-  DATABASE_URL, WEBHOOK_TOKEN,
-  ST_APP_KEY / ST_TENANT_ID / ST_CLIENT_ID / ST_CLIENT_SECRET (optional —
-  enables the ST notes push)
+  DATABASE_URL, WEBHOOK_TOKEN — nothing else. ServiceTitan credentials
+  stay OFF this host by design: the ST customer-note push happens in the
+  GitHub Actions cron (scripts/sms_poll_inbound.py sweeps posted_to_st=false
+  rows every 5 minutes), so a webhook-host compromise never exposes ST
+  write access. If ST_* vars happen to be present, notes post inline.
 
 Then point Telnyx at it:
   PATCH https://api.telnyx.com/v2/messaging_profiles/{profile_id}

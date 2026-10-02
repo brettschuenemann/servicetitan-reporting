@@ -57,11 +57,59 @@ def main() -> int:
     args = parser.parse_args()
 
     # Telnyx delivers inbound via webhooks only (webhook/telnyx_webhook.py
-    # on Render) — polling is a Twilio-only mechanism.
+    # on Render). The webhook host deliberately does NOT hold ServiceTitan
+    # credentials, so under telnyx this cron's job is the ST-notes sweep:
+    # push any recent messages that haven't been posted to the customer's
+    # ST record yet, then exit.
     from lib.sms import sms_provider
     if sms_provider() == "telnyx":
-        print("[sms_poll_inbound] provider=telnyx — inbound arrives via "
-              "webhook receiver, nothing to poll")
+        from lib.sms import _format_st_note
+        st_client = None
+        if all(os.environ.get(k) for k in (
+            "ST_APP_KEY", "ST_TENANT_ID", "ST_CLIENT_ID", "ST_CLIENT_SECRET"
+        )):
+            st_client = ServiceTitanClient(
+                app_key=os.environ["ST_APP_KEY"],
+                tenant_id=os.environ["ST_TENANT_ID"],
+                client_id=os.environ["ST_CLIENT_ID"],
+                client_secret=os.environ["ST_CLIENT_SECRET"],
+            )
+        if st_client is None:
+            print("[sms_poll_inbound] telnyx mode — no ST creds, nothing to do")
+            return 0
+        with get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT id, direction, body, sent_by, customer_id
+                    FROM sms_messages
+                    WHERE posted_to_st = FALSE
+                      AND customer_id IS NOT NULL
+                      AND status NOT IN ('dry_run', 'failed', 'opted_out', 'mock')
+                      AND sent_at >= NOW() - INTERVAL '7 days'
+                    ORDER BY sent_at LIMIT 50
+                    """
+                )
+                todo = list(cur.fetchall())
+            pushed = 0
+            for row in todo:
+                try:
+                    note = _format_st_note(
+                        "IN" if row["direction"] == "inbound" else "OUT",
+                        row["body"] or "", row.get("sent_by"),
+                    )
+                    st_client.create_customer_note(int(row["customer_id"]), note)
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE sms_messages SET posted_to_st = TRUE WHERE id = %s",
+                            (row["id"],),
+                        )
+                    conn.commit()
+                    pushed += 1
+                except Exception as exc:
+                    print(f"  note push failed for msg {row['id']}: {exc}")
+            print(f"[sms_poll_inbound] telnyx mode — ST-notes sweep: "
+                  f"{pushed}/{len(todo)} pushed")
         return 0
 
     # Quick env check — bail early if Twilio not configured (cron-safe)
