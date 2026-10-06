@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
 
-from lib.database import get_connection
+from lib.database import get_connection, not_staff_sql
 from lib.email_send import send_email
 
 
@@ -54,12 +54,13 @@ def fetch_daily_revenue(conn, start_date: date, end_date: date) -> dict[date, fl
 def fetch_daily_calls(conn, start_date: date, end_date: date) -> dict[date, int]:
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT (received_on AT TIME ZONE 'America/Chicago')::date AS d,
                    COUNT(*) AS n
             FROM calls
             WHERE direction = 'Inbound'
               AND (received_on AT TIME ZONE 'America/Chicago')::date BETWEEN %s AND %s
+              AND {not_staff_sql('from_phone')}
             GROUP BY d
             """, (start_date, end_date),
         )

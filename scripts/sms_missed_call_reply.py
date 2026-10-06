@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
 
-from lib.database import get_connection
+from lib.database import get_connection, not_staff_sql
 from lib.servicetitan import ServiceTitanClient
 from lib.sms import send_sms, normalize_phone, dry_run_enabled
 
@@ -70,9 +70,10 @@ def find_candidate_calls(conn, look_back_min: int) -> list[dict]:
     """Inbound abandoned/unbooked calls within window that we haven't
     already auto-replied to in the last 24h.
     """
+    not_staff = not_staff_sql("c.from_phone")
     with conn.cursor() as cur:
         cur.execute(
-            """
+            f"""
             SELECT c.id              AS call_id,
                    c.customer_id,
                    c.customer_name,
@@ -84,6 +85,8 @@ def find_candidate_calls(conn, look_back_min: int) -> list[dict]:
               AND c.call_type IN ('Abandoned', 'Unbooked')
               AND c.received_on >= NOW() - (%s * INTERVAL '1 minute')
               AND c.from_phone IS NOT NULL
+              -- Never auto-text our own techs/office calling in
+              AND {not_staff}
               -- Don't double-text within 24h
               AND NOT EXISTS (
                 SELECT 1 FROM sms_messages s

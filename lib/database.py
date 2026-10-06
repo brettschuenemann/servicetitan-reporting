@@ -204,6 +204,17 @@ CREATE INDEX IF NOT EXISTS ix_calls_agent        ON calls(agent_id);
 CREATE INDEX IF NOT EXISTS ix_calls_customer     ON calls(customer_id);
 CREATE INDEX IF NOT EXISTS ix_calls_call_type    ON calls(call_type);
 
+-- Our own people's phone numbers (techs + office staff), refreshed on
+-- every hourly sync from ST technicians + employees. Used to exclude
+-- staff self-calls from inbound-call analytics and from SMS automation
+-- candidate lists. normalized_phone = last-10 digits.
+CREATE TABLE IF NOT EXISTS staff_phones (
+    normalized_phone TEXT PRIMARY KEY,
+    name             TEXT,
+    role             TEXT,               -- 'tech' | 'office'
+    fetched_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS sync_state (
     entity            TEXT PRIMARY KEY,
     last_modified_on  TEXT,
@@ -626,6 +637,16 @@ def db() -> Iterator[psycopg2.extensions.connection]:
         yield conn
     finally:
         _pool_put(conn)
+
+
+def not_staff_sql(phone_col: str) -> str:
+    """SQL fragment: TRUE when phone_col isn't one of our own staff's
+    numbers (staff_phones, refreshed hourly by the sync). Matches on
+    last-10 digits; harmless no-op while the table is empty."""
+    return (
+        f"RIGHT(REGEXP_REPLACE(COALESCE({phone_col}, ''), '\\D', '', 'g'), 10) "
+        "NOT IN (SELECT normalized_phone FROM staff_phones)"
+    )
 
 
 def get_sync_state(conn, entity: str) -> Optional[dict]:

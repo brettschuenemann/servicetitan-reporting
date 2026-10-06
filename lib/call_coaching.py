@@ -24,6 +24,7 @@ import requests
 from anthropic import Anthropic
 from psycopg2.extras import execute_values
 
+from .database import not_staff_sql
 from .servicetitan import ServiceTitanClient
 
 
@@ -297,7 +298,7 @@ def compute_conversion_stats(
         # — either direct from calls.customer_id, or via phone-match against
         # customer_contacts. The CTE produces effective_customer_id per call.
         cur.execute(
-            r"""
+            rf"""
             WITH resolved AS (
               SELECT
                 c.id,
@@ -320,6 +321,7 @@ def compute_conversion_stats(
               FROM calls c JOIN call_scores s ON s.call_id = c.id
               WHERE s.audience = %s
                 AND c.direction = 'Inbound'
+                AND {not_staff_sql("c.from_phone")}
                 AND c.received_on >= NOW() - (%s || ' day')::interval
                 AND s.error IS NULL
             )
@@ -341,7 +343,7 @@ def compute_conversion_stats(
         # was at-or-after the call) vs existing (first invoice was before)
         # — surfaces brand-new customer acquisitions distinctly.
         cur.execute(
-            r"""
+            rf"""
             WITH resolved AS (
               SELECT
                 c.id,
@@ -362,6 +364,7 @@ def compute_conversion_stats(
               FROM calls c JOIN call_scores s ON s.call_id = c.id
               WHERE s.audience = %s
                 AND c.direction = 'Inbound'
+                AND {not_staff_sql("c.from_phone")}
                 AND c.received_on >= NOW() - (%s || ' day')::interval
                 AND s.error IS NULL
             ),

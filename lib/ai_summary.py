@@ -15,7 +15,7 @@ from datetime import date, timedelta
 import anthropic
 import streamlit as st
 
-from .database import db
+from .database import db, not_staff_sql
 
 SUMMARY_DAYS = 14  # rolling window — matches what we showed in chat earlier
 
@@ -185,6 +185,7 @@ def _gather_metrics(end: date, window_days: int = SUMMARY_DAYS) -> dict:
         cur.execute(
             "SELECT call_type, COUNT(*) n FROM calls "
             "WHERE direction = 'Inbound' AND created_on::date BETWEEN %s AND %s "
+            "AND " + not_staff_sql("from_phone") + " "
             "GROUP BY call_type",
             (start, end),
         )
@@ -197,6 +198,7 @@ def _gather_metrics(end: date, window_days: int = SUMMARY_DAYS) -> dict:
             "FROM calls "
             "WHERE direction='Inbound' AND agent_name IS NOT NULL "
             "  AND created_on::date BETWEEN %s AND %s "
+            "  AND " + not_staff_sql("from_phone") + " "
             "GROUP BY agent_name ORDER BY total DESC LIMIT 5",
             (start, end),
         )

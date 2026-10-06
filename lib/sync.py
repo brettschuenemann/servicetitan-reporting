@@ -735,6 +735,63 @@ def sync_appointment_assignments(
     return {"upserted": len(assigns), "total": total}
 
 
+def sync_staff_phones(
+    client: ServiceTitanClient,
+    conn: psycopg2.extensions.connection,
+    progress: ProgressCallback = _noop,
+) -> dict:
+    """Full-refresh staff_phones from ST technicians + employees.
+
+    Captures every phone field ST exposes (phoneNumber, mobilePhone,
+    outboundCallerId) for active people, stored as last-10 digits.
+    Downstream, lib.database.not_staff_sql() excludes these numbers
+    from inbound-call analytics and SMS automation candidates.
+    """
+    import re as _re
+
+    def _last10(raw) -> str | None:
+        digits = _re.sub(r"\D", "", str(raw or ""))
+        return digits[-10:] if len(digits) >= 10 else None
+
+    rows: dict[str, tuple[str, str]] = {}  # phone -> (name, role)
+    for t in client.get_technicians():
+        if not t.get("active"):
+            continue
+        for fld in ("phoneNumber", "mobilePhone", "outboundCallerId"):
+            p = _last10(t.get(fld))
+            if p:
+                rows[p] = (t.get("name") or "?", "tech")
+    try:
+        for e in client._paginate(
+            f"/settings/v2/tenant/{client.tenant_id}/employees"
+        ):
+            if not e.get("active"):
+                continue
+            for fld in ("phoneNumber", "mobilePhone", "outboundCallerId"):
+                p = _last10(e.get(fld))
+                if p:
+                    rows.setdefault(p, (e.get("name") or "?", "office"))
+    except Exception as exc:
+        progress(f"employees fetch skipped: {exc}")
+
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM staff_phones")
+        for phone, (name, role) in rows.items():
+            cur.execute(
+                """
+                INSERT INTO staff_phones (normalized_phone, name, role, fetched_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (normalized_phone) DO UPDATE SET
+                  name = EXCLUDED.name, role = EXCLUDED.role,
+                  fetched_at = EXCLUDED.fetched_at
+                """,
+                (phone, name, role),
+            )
+    conn.commit()
+    progress(f"staff_phones: {len(rows)} numbers")
+    return {"upserted": len(rows), "total": len(rows)}
+
+
 def sync_for_email(
     client: ServiceTitanClient,
     conn: psycopg2.extensions.connection,
@@ -760,6 +817,7 @@ def sync_for_email(
         ("calls", sync_calls),
         ("appointment_assignments", sync_appointment_assignments),
         ("memberships", sync_memberships),
+        ("staff_phones", sync_staff_phones),
         ("call_list_contacts", sync_call_list_contacts),
         ("call_list_openers", sync_call_list_openers),
     ]

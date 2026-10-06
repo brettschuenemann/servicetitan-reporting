@@ -9,7 +9,7 @@ import streamlit as st
 
 from lib.auth import require_password
 from lib.call_intents import INTENT_DISPLAY
-from lib.database import db
+from lib.database import db, not_staff_sql
 from lib.style import apply_mobile_styles, chart_height, style_status_columns
 
 st.set_page_config(page_title="Calls · ServiceTitan Reporting", layout="wide")
@@ -285,6 +285,7 @@ else:
               WHERE c.direction = 'Inbound'
                 AND cs.intent IS NOT NULL
                 AND c.created_on::date BETWEEN %s AND %s
+                AND """ + not_staff_sql("c.from_phone") + """
             )
             SELECT
               cc.intent,
@@ -388,6 +389,7 @@ def load_misclassified(s: date, e: date) -> pd.DataFrame:
               AND c.call_type IN ('Excused', 'NotLead')
               AND cs.intent IN %s
               AND c.created_on::date BETWEEN %s AND %s
+              AND """ + not_staff_sql("c.from_phone") + """
             ORDER BY c.received_on DESC
             """,
             (LEAD_LIKE, s, e),
